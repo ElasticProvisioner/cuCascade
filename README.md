@@ -1,150 +1,82 @@
-# __NVIDIA_OSS__ Standard Repo Template
+# cuCascade
 
-- Files (org-wide templates in the NVIDIA .github org repo; per-repo overrides allowed)
+A GPU memory management and data representation library extracted from the Sirius project.
 
-   - Root 
-     - README.md skeleton (CTA + Quickstart + Support/Security/Governance links) 
-     - LICENSE (Apache 2.0 by default)
-        - For other licenses, see the [Confluence page](https://confluence.nvidia.com/pages/viewpage.action?pageId=788418816) for other licenses
-        - CLA.md file (delete if not using MIT or BSD licenses)
-     - CODE_OF_CONDUCT.md 
-     - SECURITY.md (vuln reporting path) 
-     - CONTRIBUTING.md (base; repo can add specifics)
-     - SUPPORT.md (Support levels/channels)
-     - GOVERNANCE.md (baseline; repo may extend)
-     - CITATION.md (for projects that need citation)
+## Features
 
-   - .github/ 
-     - ISSUE_TEMPLATE/ (<https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/configuring-issue-templates-for-your-repository>)
-       - bug.yml, feature.yml, task.yml, config.yml 
-     - PULL_REQUEST_TEMPLATE.md (<https://docs.github.com/en/communities/using-templates-to-encourage-useful-issues-and-pull-requests/creating-a-pull-request-template-for-your-repository>)
-     - workflows/
-     - Note: workflow-templates/ for starter workflows should live in the org-level .github repo, not per-repo
+- **Memory Management**: GPU, Host, and Disk tier memory allocation and reservation systems
+- **Data Representation**: CPU and GPU data representations with batch processing support
+- **Topology Discovery**: Hardware topology discovery for optimal memory placement
+- **Thread-Safe**: Lock-free memory reservation and data batch management
 
-   - Repo-specific (not org-template, maintained by the team)
-     - CODEOWNERS (place at .github/CODEOWNERS or repo root)
-     - CHANGELOG.md (or RELEASE.md) 
-     - ROADMAP.md 
-     - MAINTAINERS.md 
-     - NOTICE or THIRD_PARTY_NOTICES / THIRD_PARTY_LICENSES (dependency specific)
-     - Build/package files (CMake, pyproject, Dockerfile, etc.)
+## Prerequisites
 
-   - Recommended structure and hygiene
-     - docs/
-     - examples/
-     - tests/
-     - scripts/
-     - Container/dev env: Dockerfile, docker/, .devcontainer/ (optional)
-     - Build/package (language-specific):
-       - Python: pyproject.toml, setup.cfg/setup.py, requirements.txt, environment.yml
-       - C++: CMakeLists.txt, cmake/, vcpkg.json
-     - Repo hygiene: .gitignore, .gitattributes, .editorconfig, .pre-commit-config.yaml, .clang-format
+- CUDA 13+
+- libcudf 25.10+
+- CMake 3.26.4+
+- Ninja build system
+- C++20 compiler
 
+## Building with Pixi
 
-## Usage for NVIDIA OSS repos
+The project uses [Pixi](https://pixi.sh/) for dependency management:
 
-1. Clone this repo
-2. Find/replace all in the clone of `___PROJECT___` and `__PROJECT_NAME__` and replace with the name of the new library
-3. Inspect all files to make sure all replacements work and update text as needed
-
-
-**What you can reuse immediately**
-- CODE_OF_CONDUCT.md
-- SECURITY.md
-- CONTRIBUTING.md (base)
-- .github/ISSUE_TEMPLATE/.yml (bug/feature/task + config.yml)
-- .github/PULL_REQUEST_TEMPLATE.md
-- Reusable workflows 
-
-**What you must customize per repo**
-- README.md: copy the skeleton and fill in product-specific details (Quickstart, Requirements, Usage, Support level, links)
-- LICENSE: check file is correct, update year, consult Confluence for alternatives https://confluence.nvidia.com/pages/viewpage.action?pageId=788418816, add CLA.md only if your license/process requires it
-- CODEOWNERS: replace <TEAM> with your GitHub team handle(s). Place at .github/CODEOWNERS (or repo root)
-- MAINTAINERS.md: list maintainers names/roles, escalation path
-- CHANGELOG.md (or RELEASE.md): track releases/changes
-- SUPPORT.md: Update for your project
-- ROADMAP.md (optional): upcoming milestones
-- NOTICE / THIRD_PARTY_NOTICES (if you ship third‑party content)
-- Build/package files (CMake/pyproject/Dockerfile/etc.), tests/, docs/, examples/, scripts/ as appropriate
-- Workflows: Edit if you need custom behavior 
-
-
-4. Change git origin to point to new repo and push
-5. Remove the line break below and everything above it
-
-## Usage for existing NVIDIA OSS repos
-
-1. Follow the steps above, but add the files to your existing repo and merge
-
-<!-- REMOVE THE LINE BELOW AND EVERYTHING ABOVE -->
------------------------------------------
-# [Project Title]
-One-sentence value proposition for users. Who is it for, and why it matters. 
-
-# Overview
-What the project does? Why the project is useful?
-Provide a brief overview, highlighting key features or problem-solving capabilities.
-
-# Getting Started
-Guide users on how they can get started with the project. This should include basic installation step, quick-start examples 
 ```bash
-# Option A: Package manager (pip/conda/npm/etc.)
-<copy-paste install>
+# Install pixi if not already installed
+curl -fsSL https://pixi.sh/install.sh | bash
 
-# Option B: Container
-docker run <image> <args>
+# Install dependencies and build
+pixi install
+pixi run build
 
-# Verify (hello world)
-<one-liner or ~10-line example>
+# Run tests
+pixi run test
 ```
-# Requirements
-Include a list of pre-requisites. 
-- OS/Arch: <summary or link to full matrix>
-- Runtime/Compiler: <versions>
-- GPU/Drivers (if applicable): CUDA <ver>, driver <ver>, etc.
 
-# Usage
+## Building with CMake
+
+If you prefer to manage dependencies yourself:
+
 ```bash
-# Minimal runnable snippet (≤20 lines)
-<code>
+# Configure
+cmake --preset release
+
+# Build
+cmake --build build/release
+
+# Test
+cd build/release && ctest --output-on-failure
 ```
-- More examples/tutorials: <link>
-- API reference: <link>
 
-# Performance (Optional)
-Summary of benchmarks; link to detailed results and hardware used.
+## Project Structure
 
-## Releases & Roadmap 
-- Releases/Changelog: <link>
-- (Optional) Next milestones or link to `ROADMAP.md`.
-  
-# Contribution Guidelines
-- Start here: `CONTRIBUTING.md`
-- Code of Conduct: `CODE_OF_CONDUCT.md`
-- Development quickstart (build/test):
-```bash
-<clone> && <deps> && <build/test>
 ```
-## Governance & Maintainers
-- Governance: `GOVERNANCE.md`
-- Maintainers: <team/handles>
-- Labeling/triage policy: <link>
+cuCascade/
+├── include/
+│   ├── data/           # Data representation headers
+│   ├── memory/         # Memory management headers
+│   ├── log/            # Logging utilities
+│   └── helper/         # Common helper headers
+├── src/
+│   ├── data/           # Data representation implementation
+│   └── memory/         # Memory management implementation
+├── test/
+│   ├── data/           # Data module tests
+│   ├── memory/         # Memory module tests
+│   └── utils/          # Test utilities
+├── CMakeLists.txt      # Main CMake configuration
+├── CMakePresets.json   # CMake presets for build configurations
+└── pixi.toml           # Pixi dependency management
+```
 
-## Security
-- Vulnerability disclosure: `SECURITY.md`
-- Do not file public issues for security reports.
+## Memory Tiers
 
-## Support
-- Level: <Experimental | Maintained | Stable>
-- How to get help: Issues/Discussions/<channel link>
-- Response expectations (if any).
+cuCascade supports three memory tiers:
 
-# Community
-Provide the channel for community communications.
+- **GPU**: Device memory (fastest, limited capacity)
+- **HOST**: Pinned host memory (medium speed, larger capacity)
+- **DISK**: Storage (slowest, unlimited capacity)
 
-# References
-Provide a list of related references
+## License
 
-# License
-This project is licensed under the [NAME HERE] License - see the LICENSE.md file for details
-- License: <link>
+Apache License 2.0
