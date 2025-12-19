@@ -217,7 +217,7 @@ size_t memory_space::get_max_memory() const noexcept { return _memory_limit; }
 rmm::mr::device_memory_resource* memory_space::get_default_allocator() const noexcept
 {
   return std::visit(
-    cucascade::overloaded{[this](const std::unique_ptr<disk_access_limiter>& other)
+    cucascade::overloaded{[this]([[maybe_unused]] const std::unique_ptr<disk_access_limiter>& other)
                             -> rmm::mr::device_memory_resource* { return _allocator.get(); },
                           [](const std::unique_ptr<reservation_aware_resource_adaptor>& mr)
                             -> rmm::mr::device_memory_resource* { return mr.get(); },
@@ -252,7 +252,7 @@ void memory_space::shutdown()
 size_t memory_space_hash::operator()(const memory_space& ms) const
 {
   return std::hash<int>{}(static_cast<int>(ms.get_tier())) ^
-         (std::hash<size_t>{}(ms.get_device_id()) << 1);
+         (std::hash<size_t>{}(static_cast<size_t>(ms.get_device_id())) << 1);
 }
 
 }  // namespace memory

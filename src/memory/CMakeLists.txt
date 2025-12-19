@@ -15,7 +15,7 @@
 # =============================================================================
 
 target_sources(
-  cucascade
+  cucascade_objects
   PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/common.cpp
           ${CMAKE_CURRENT_SOURCE_DIR}/disk_access_limiter.cpp
           ${CMAKE_CURRENT_SOURCE_DIR}/fixed_size_host_memory_resource.cpp

@@ -59,7 +59,7 @@ std::unique_ptr<idata_representation> host_table_representation::convert_to_memo
     size_t src_block_index      = 0;
     size_t src_block_offset     = 0;
     size_t dst_offset           = 0;
-    size_t const src_block_size = _host_table->allocation->block_size;
+    size_t const src_block_size = _host_table->allocation->block_size();
     while (dst_offset < data_size) {
       size_t remaining_bytes              = data_size - dst_offset;
       size_t bytes_available_in_src_block = src_block_size - src_block_offset;
@@ -101,8 +101,8 @@ std::unique_ptr<idata_representation> host_table_representation::convert_to_memo
     size_t src_block_offset     = 0;
     size_t dst_block_index      = 0;
     size_t dst_block_offset     = 0;
-    size_t const src_block_size = _host_table->allocation->block_size;
-    size_t const dst_block_size = dst_allocation->block_size;
+    size_t const src_block_size = _host_table->allocation->block_size();
+    size_t const dst_block_size = dst_allocation->block_size();
     size_t copied               = 0;
     while (copied < data_size) {
       size_t remaining     = data_size - copied;

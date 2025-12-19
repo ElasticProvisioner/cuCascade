@@ -44,7 +44,7 @@ std::size_t gpu_table_representation::get_size_in_bytes() const
   for (auto const& col : _table.view()) {
     // For now, we can calculate a rough estimate based on column size
     // This will need to be refined to account for all buffers (data, validity, offsets, etc.)
-    total_size += col.size() * cudf::size_of(col.type());
+    total_size += static_cast<std::size_t>(col.size()) * cudf::size_of(col.type());
   }
   return total_size;
 }
@@ -102,7 +102,7 @@ std::unique_ptr<idata_representation> gpu_table_representation::convert_to_memor
     size_t block_index      = 0;
     size_t block_offset     = 0;
     size_t source_offset    = 0;
-    const size_t block_size = allocation->block_size;
+    const size_t block_size = allocation->block_size();
     while (source_offset < packed_data.gpu_data->size()) {
       size_t remaining_bytes         = packed_data.gpu_data->size() - source_offset;
       size_t bytes_to_copy           = std::min(remaining_bytes, block_size - block_offset);

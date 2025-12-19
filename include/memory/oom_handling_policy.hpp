@@ -55,10 +55,10 @@ struct oom_handling_policy {
 
 struct throw_on_oom_policy final : public oom_handling_policy {
  protected:
-  void* do_handle_oom(std::size_t bytes,
-                      rmm::cuda_stream_view stream,
+  void* do_handle_oom([[maybe_unused]] std::size_t bytes,
+                      [[maybe_unused]] rmm::cuda_stream_view stream,
                       std::exception_ptr eptr,
-                      RetryFunc retry_function) final
+                      [[maybe_unused]] RetryFunc retry_function) final
   {
     std::rethrow_exception(eptr);
   }

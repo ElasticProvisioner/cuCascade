@@ -120,7 +120,7 @@ class data_batch_processing_handle {
  * @brief A data batch represents a collection of data that can be moved between different memory
  * tiers.
  *
- * data_batch is the core unit of data management in the Sirius system. It wraps an
+ * data_batch is the core unit of data management in cuCascade. It wraps an
  * idata_representation and provides processing counting functionality to track when data is being
  * actively used. This enables safe memory management and efficient data movement
  * between GPU memory, host memory, and storage tiers.

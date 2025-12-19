@@ -106,10 +106,11 @@ increase_reservation_limit_policy::increase_reservation_limit_policy(double padd
 {
 }
 
-void increase_reservation_limit_policy::handle_over_reservation(rmm::cuda_stream_view stream,
-                                                                std::size_t requested_bytes,
-                                                                std::size_t current_allocated,
-                                                                reserved_arena* reserved_bytes)
+void increase_reservation_limit_policy::handle_over_reservation(
+  [[maybe_unused]] rmm::cuda_stream_view stream,
+  std::size_t requested_bytes,
+  std::size_t current_allocated,
+  reserved_arena* reserved_bytes)
 {
   if (!reserved_bytes) { RMM_FAIL("No reservation set for stream", rmm::out_of_memory); }
 
@@ -117,7 +118,8 @@ void increase_reservation_limit_policy::handle_over_reservation(rmm::cuda_stream
   std::size_t extra_space_needed   = post_allocation_size - reserved_bytes->size();
 
   // Add padding to avoid frequent increases
-  std::size_t padded_reservation = static_cast<std::size_t>(extra_space_needed * _padding_factor);
+  std::size_t padded_reservation =
+    static_cast<std::size_t>(static_cast<double>(extra_space_needed) * _padding_factor);
 
   // Try to grow the reservation
   if (!reserved_bytes->grow_by(padded_reservation)) {

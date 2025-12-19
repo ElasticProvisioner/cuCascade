@@ -70,9 +70,8 @@ std::vector<memory_space*> any_memory_space_in_tier_with_preference::get_candida
   if (preferred_device_id.has_value()) {
     std::stable_partition(candidates.begin(),
                           candidates.end(),
-                          [device_id = preferred_device_id.value()](const auto* ms) {
-                            return ms->get_device_id() == device_id;
-                          });
+                          [device_id = static_cast<int>(preferred_device_id.value())](
+                            const auto* ms) { return ms->get_device_id() == device_id; });
   }
   return candidates;
 }
@@ -98,7 +97,7 @@ std::vector<memory_space*> any_memory_space_in_tiers::get_candidates(
 }
 
 std::vector<memory_space*> specific_memory_space::get_candidates(
-  memory_reservation_manager& manager) const
+  [[maybe_unused]] memory_reservation_manager& manager) const
 {
   auto* ms = this->get_memory_resource(target_id);
   if (ms) { return {ms}; }
@@ -106,13 +105,13 @@ std::vector<memory_space*> specific_memory_space::get_candidates(
 }
 
 std::vector<memory_space*> any_memory_space_to_downgrade::get_candidates(
-  memory_reservation_manager& manager) const
+  [[maybe_unused]] memory_reservation_manager& manager) const
 {
   return {};
 }
 
 std::vector<memory_space*> any_memory_space_to_upgrade::get_candidates(
-  memory_reservation_manager& manager) const
+  [[maybe_unused]] memory_reservation_manager& manager) const
 {
   return {};
 }
@@ -138,8 +137,10 @@ memory_reservation_manager::memory_reservation_manager(std::vector<memory_space_
       config.tier,
       config.device_id,
       config.memory_limit,
-      config.downgrade_tigger_threshold * config.memory_capacity,
-      config.downgrade_stop_threshold * config.memory_capacity,
+      static_cast<std::size_t>(config.downgrade_tigger_threshold *
+                               static_cast<float>(config.memory_capacity)),
+      static_cast<std::size_t>(config.downgrade_stop_threshold *
+                               static_cast<float>(config.memory_capacity)),
       config.memory_capacity,
       config.mr_factory_fn(config.device_id, config.memory_limit, config.memory_capacity));
     _memory_spaces.push_back(std::move(mem_space));
@@ -235,18 +236,16 @@ const memory_space* memory_reservation_manager::get_memory_space(Tier tier, int3
 std::span<const memory_space*> memory_reservation_manager::get_memory_spaces_for_tier(
   Tier tier) const
 {
-  // auto it = _tier_to_memory_spaces.find(tier);
-  // if (it != _tier_to_memory_spaces.end()) {
-  //   return std::span<const memory_space*>{it->second.data(), it->second.size()};
-  // }
+  auto it = _const_tier_to_memory_spaces.find(tier);
+  if (it != _const_tier_to_memory_spaces.end()) {
+    return const_cast<std::vector<const memory_space*>&>(it->second);
+  }
   return {};
 }
 
 std::span<const memory_space*> memory_reservation_manager::get_all_memory_spaces() const noexcept
 {
-  // return std::span<const memory_space*>{_memory_space_views.data(),
-  // _memory_space_views.size()};
-  return {};
+  return const_cast<std::vector<const memory_space*>&>(_const_memory_space_views);
 }
 
 memory_space* memory_reservation_manager::get_mutable_memory_space(Tier tier, int32_t device_id)
@@ -375,17 +374,21 @@ void memory_reservation_manager::build_lookup_tables()
 {
   _memory_space_lookup.clear();
   _tier_to_memory_spaces.clear();
+  _const_tier_to_memory_spaces.clear();
   _memory_space_views.clear();
+  _const_memory_space_views.clear();
 
   for (const auto& space : _memory_spaces) {
     memory_space* space_ptr = space.get();
     _memory_space_views.push_back(space_ptr);
+    _const_memory_space_views.push_back(space_ptr);
 
     // Build direct lookup table
     _memory_space_lookup[space_ptr->get_id()] = space_ptr;
 
     // Build tier-to-spaces mapping
     _tier_to_memory_spaces[space_ptr->get_tier()].push_back(space_ptr);
+    _const_tier_to_memory_spaces[space_ptr->get_tier()].push_back(space_ptr);
   }
 }
 

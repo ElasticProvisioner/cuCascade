@@ -55,8 +55,8 @@ struct operator_port_key {
 /**
  * @brief Central manager for coordinating data repositories across multiple pipelines.
  *
- * data_repository_manager serves as the top-level coordinator for data management in the
- * Sirius system. It maintains a collection of idata_repository instances, each associated
+ * data_repository_manager serves as the top-level coordinator for data management in
+ * cuCascade. It maintains a collection of idata_repository instances, each associated
  * with a specific pipeline, and provides centralized services for:
  *
  * - Repository lifecycle management (creation, access, cleanup)
@@ -178,7 +178,8 @@ class data_repository_manager {
    * @return std::vector<PtrType> A vector of data batches that are candidates for downgrade
    */
   std::vector<PtrType> get_data_batches_for_downgrade(
-    cucascade::memory::memory_space_id memory_space_id, size_t amount_to_downgrade)
+    [[maybe_unused]] cucascade::memory::memory_space_id memory_space_id,
+    [[maybe_unused]] size_t amount_to_downgrade)
   {
     std::vector<PtrType> data_batches;
     // Note: Implementation would iterate through repositories and collect batches

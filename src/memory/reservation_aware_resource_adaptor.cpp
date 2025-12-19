@@ -54,7 +54,6 @@ struct stream_ordered_allocation_tracker
     std::lock_guard lock(mutex);
     auto it = stream_stats_map.find(stream.value());
     if (it == stream_stats_map.end()) { return; }
-    auto* res_pnt = it->second->memory_reservation.get();
     stream_stats_map.erase(stream.value());
   }
 
@@ -96,12 +95,12 @@ struct ptds_allocation_tracker
 
   ptds_allocation_tracker() = default;
 
-  void reset_tracker_state(rmm::cuda_stream_view stream) override
+  void reset_tracker_state([[maybe_unused]] rmm::cuda_stream_view stream) override
   {
     if (thread_reservation_state) { thread_reservation_state.reset(); }
   }
 
-  void assign_reservation_to_tracker(rmm::cuda_stream_view stream,
+  void assign_reservation_to_tracker([[maybe_unused]] rmm::cuda_stream_view stream,
                                      std::unique_ptr<device_reserved_arena> arena,
                                      std::unique_ptr<reservation_limit_policy> policy,
                                      std::unique_ptr<oom_handling_policy> oom_policy) override
@@ -114,12 +113,14 @@ struct ptds_allocation_tracker
       std::move(arena), std::move(policy), std::move(oom_policy));
   }
 
-  stream_ordered_tracker_state* get_tracker_state(rmm::cuda_stream_view stream) override
+  stream_ordered_tracker_state* get_tracker_state(
+    [[maybe_unused]] rmm::cuda_stream_view stream) override
   {
     return thread_reservation_state.get();
   }
 
-  const stream_ordered_tracker_state* get_tracker_state(rmm::cuda_stream_view stream) const override
+  const stream_ordered_tracker_state* get_tracker_state(
+    [[maybe_unused]] rmm::cuda_stream_view stream) const override
   {
     return thread_reservation_state.get();
   }
@@ -138,30 +139,34 @@ stream_ordered_tracker_state::stream_ordered_tracker_state(
 }
 
 std::size_t reservation_aware_resource_adaptor::stream_ordered_tracker_state::
-  check_reservation_and_handle_overflow(reservation_aware_resource_adaptor& adaptor,
-                                        std::size_t allocation_size,
-                                        rmm::cuda_stream_view stream)
+  check_reservation_and_handle_overflow(
+    [[maybe_unused]] reservation_aware_resource_adaptor& adaptor,
+    std::size_t allocation_size,
+    rmm::cuda_stream_view stream)
 {
-  int64_t stream_tracking_size = static_cast<int64_t>(allocation_size);
-  auto upstream_tracking_size  = stream_tracking_size;
+  int64_t stream_tracking_size       = static_cast<int64_t>(allocation_size);
+  std::size_t upstream_tracking_size = allocation_size;
 
+  auto reservation_size = static_cast<int64_t>(memory_reservation->size());
   auto [success, post_allocation_inc] =
-    memory_reservation->allocated_bytes.try_add(stream_tracking_size, memory_reservation->size());
+    memory_reservation->allocated_bytes.try_add(stream_tracking_size, reservation_size);
   if (!success) {
     if (reservation_policy) {
       std::lock_guard lock(_arbitration_mutex);
-      reservation_policy->handle_over_reservation(
-        stream, allocation_size, post_allocation_inc, memory_reservation.get());
+      reservation_policy->handle_over_reservation(stream,
+                                                  allocation_size,
+                                                  static_cast<std::size_t>(post_allocation_inc),
+                                                  memory_reservation.get());
     }
     post_allocation_inc = memory_reservation->allocated_bytes.add(stream_tracking_size);
   }
   memory_reservation->peak_allocated_bytes.update_peak(post_allocation_inc);
 
   int64_t pre_allocation_inc = post_allocation_inc - stream_tracking_size;
-  if (post_allocation_inc < memory_reservation->size()) {
+  if (post_allocation_inc < reservation_size) {
     upstream_tracking_size = 0UL;
-  } else if (pre_allocation_inc < memory_reservation->size()) {
-    upstream_tracking_size = post_allocation_inc - memory_reservation->size();
+  } else if (pre_allocation_inc < reservation_size) {
+    upstream_tracking_size = static_cast<std::size_t>(post_allocation_inc - reservation_size);
   }
   return upstream_tracking_size;
 }
@@ -255,14 +260,18 @@ std::size_t reservation_aware_resource_adaptor::get_allocated_bytes(
   rmm::cuda_stream_view stream) const
 {
   const auto* stats = _allocation_tracker->get_tracker_state(stream);
-  return stats ? stats->memory_reservation->allocated_bytes.load() : 0;
+  return stats ? static_cast<std::size_t>(
+                   std::max(int64_t{0}, stats->memory_reservation->allocated_bytes.load()))
+               : 0;
 }
 
 std::size_t reservation_aware_resource_adaptor::get_peak_allocated_bytes(
   rmm::cuda_stream_view stream) const
 {
   const auto* stats = _allocation_tracker->get_tracker_state(stream);
-  return stats ? stats->memory_reservation->peak_allocated_bytes.peak() : 0;
+  return stats ? static_cast<std::size_t>(
+                   std::max(int64_t{0}, stats->memory_reservation->peak_allocated_bytes.peak()))
+               : 0;
 }
 
 std::size_t reservation_aware_resource_adaptor::get_total_allocated_bytes() const
@@ -350,7 +359,7 @@ bool reservation_aware_resource_adaptor::grow_reservation_by(device_reserved_are
 
 void reservation_aware_resource_adaptor::shrink_reservation_to_fit(device_reserved_arena& arena)
 {
-  int64_t current_bytes = arena.allocated_bytes.load();
+  auto current_bytes = static_cast<std::size_t>(std::max(int64_t{0}, arena.allocated_bytes.load()));
   if (current_bytes < arena.size()) {
     auto reclaimed_bytes = std::exchange(arena.size_, current_bytes) - current_bytes;
     _total_allocated_bytes.sub(reclaimed_bytes);
@@ -412,7 +421,7 @@ void* reservation_aware_resource_adaptor::do_allocate_managed(std::size_t bytes,
                   tracking_size,
                   std::placeholders::_2));
     } catch (...) {
-      state->memory_reservation->allocated_bytes.sub(padded_bytes);
+      state->memory_reservation->allocated_bytes.sub(static_cast<int64_t>(padded_bytes));
       throw;
     }
   }
@@ -445,15 +454,18 @@ void reservation_aware_resource_adaptor::do_deallocate(void* ptr,
   auto upstream_reclaimed_bytes = tracking_bytes;
   auto* reservation_state       = _allocation_tracker->get_tracker_state(stream);
   if (reservation_state != nullptr) {
-    auto* reservation              = reservation_state->memory_reservation.get();
-    int64_t post_deallocation_size = reservation->allocated_bytes.sub(tracking_bytes);
-    int64_t pre_deallocation_size  = post_deallocation_size + tracking_bytes;
-    if (pre_deallocation_size <= reservation->size()) {
+    auto* reservation     = reservation_state->memory_reservation.get();
+    auto reservation_size = static_cast<int64_t>(reservation->size());
+    int64_t post_deallocation_size =
+      reservation->allocated_bytes.sub(static_cast<int64_t>(tracking_bytes));
+    int64_t pre_deallocation_size = post_deallocation_size + static_cast<int64_t>(tracking_bytes);
+    if (pre_deallocation_size <= reservation_size) {
       // if it was made using the reserved space
       upstream_reclaimed_bytes = 0;
-    } else if (post_deallocation_size < reservation->size()) {
+    } else if (post_deallocation_size < reservation_size) {
       // if it was partially made using the reserved space
-      upstream_reclaimed_bytes = reservation->size() - post_deallocation_size;
+      upstream_reclaimed_bytes =
+        static_cast<std::size_t>(reservation_size - post_deallocation_size);
     }
   }
   _upstream.deallocate_async(ptr, bytes, stream);
@@ -497,11 +509,10 @@ void reservation_aware_resource_adaptor::do_release_reservation(
   if (!arena) return;
 
   int64_t allocation_size    = arena->allocated_bytes.load();
-  std::size_t released_bytes = arena->size();
-  if (arena->size() > allocation_size) {
-    released_bytes = arena->size() - allocation_size;
-  } else {
-    released_bytes = 0;
+  std::size_t released_bytes = 0;
+  if (static_cast<int64_t>(arena->size()) > allocation_size) {
+    released_bytes =
+      arena->size() - static_cast<std::size_t>(std::max(int64_t{0}, allocation_size));
   }
 
   _number_of_allocations.fetch_sub(1);

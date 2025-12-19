@@ -175,27 +175,27 @@ std::vector<memory_space_config> reservation_manager_configurator::build(
 
   std::vector<int> host_numa_ids = extract_host_ids(gpu_ids, topology);
   for (int numa_id : host_numa_ids) {
-    configs.emplace_back(
-      Tier::HOST,
-      numa_id,
-      static_cast<std::size_t>(capacity_per_numa_node_ * cpu_reservation_limit_ratio_),
-      capacity_per_numa_node_,
-      cpu_mr_fn_);
+    configs.emplace_back(Tier::HOST,
+                         numa_id,
+                         static_cast<std::size_t>(static_cast<double>(capacity_per_numa_node_) *
+                                                  cpu_reservation_limit_ratio_),
+                         capacity_per_numa_node_,
+                         cpu_mr_fn_);
   }
 
   return configs;
 }
 
 std::pair<std::vector<int>, std::vector<int>> reservation_manager_configurator::extract_gpu_ids(
-  const system_topology_info* topology) const
+  [[maybe_unused]] const system_topology_info* topology) const
 {
   std::vector<int> gpu_ids;
   if (std::holds_alternative<std::size_t>(n_gpus_or_gpu_ids_)) {
     std::size_t n_gpus = std::get<std::size_t>(n_gpus_or_gpu_ids_);
     assert((n_gpus <= topology->num_gpus) && "Requested number of GPUs exceeds available GPUs");
     gpu_ids.resize(n_gpus);
-    for (int gpu_id = 0; gpu_id != n_gpus; ++gpu_id) {
-      gpu_ids.push_back(gpu_id);
+    for (std::size_t gpu_id = 0; gpu_id != n_gpus; ++gpu_id) {
+      gpu_ids.push_back(static_cast<int>(gpu_id));
     }
     return {gpu_ids, gpu_ids};
   } else if (std::holds_alternative<std::unordered_map<int, int>>(n_gpus_or_gpu_ids_)) {
@@ -222,7 +222,7 @@ std::pair<std::vector<int>, std::vector<int>> reservation_manager_configurator::
     return {gpu_ids, tier_ids};
   } else {
     gpu_ids = std::get<std::vector<int>>(n_gpus_or_gpu_ids_);
-    for (int gpu_id : gpu_ids) {
+    for ([[maybe_unused]] int gpu_id : gpu_ids) {
       assert(gpu_id >= 0 && (gpu_id < static_cast<int>(topology->num_gpus)) &&
              "GPU ID out of range");
     }
@@ -232,7 +232,7 @@ std::pair<std::vector<int>, std::vector<int>> reservation_manager_configurator::
 
 std::vector<std::pair<size_t, size_t>>
 reservation_manager_configurator::extract_gpu_memory_thresholds(
-  const std::vector<int>& gpu_ids, const system_topology_info* topology) const
+  const std::vector<int>& gpu_ids, [[maybe_unused]] const system_topology_info* topology) const
 {
   std::vector<std::pair<size_t, size_t>> ts;
   for (int gpu_id : gpu_ids) {
@@ -243,9 +243,12 @@ reservation_manager_configurator::extract_gpu_memory_thresholds(
       capacity = std::get<std::size_t>(gpu_usage_limit_or_ratio_);
       assert(capacity <= total && "GPU usage limit cannot exceed total device memory");
     } else {
-      capacity = std::get<double>(gpu_usage_limit_or_ratio_) * total;
+      capacity = static_cast<std::size_t>(std::get<double>(gpu_usage_limit_or_ratio_) *
+                                          static_cast<double>(total));
     }
-    ts.emplace_back(capacity * gpu_reservation_limit_ratio_, capacity);
+    ts.emplace_back(
+      static_cast<std::size_t>(static_cast<double>(capacity) * gpu_reservation_limit_ratio_),
+      capacity);
   };
   return ts;
 }
@@ -258,7 +261,7 @@ std::vector<int> reservation_manager_configurator::extract_host_ids(
     assert(topology != nullptr && "Topology must be provided when auto-binding to NUMA nodes");
     std::set<int> gpu_numa_ids;
     for (int gpu_id : gpu_ids) {
-      const auto& gpu_info = topology->gpus[gpu_id];
+      const auto& gpu_info = topology->gpus[static_cast<std::size_t>(gpu_id)];
       gpu_numa_ids.insert(gpu_info.numa_node);
     }
     host_numa_ids.insert(host_numa_ids.end(), gpu_numa_ids.begin(), gpu_numa_ids.end());

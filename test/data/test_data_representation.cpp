@@ -156,7 +156,7 @@ TEST_CASE("host_table_representation converts to GPU and preserves contents",
   size_t copied           = 0;
   size_t block_idx        = 0;
   size_t block_off        = 0;
-  const size_t block_size = allocation->block_size;
+  const size_t block_size = allocation->block_size();
   while (copied < packed.gpu_data->size()) {
     size_t remain = packed.gpu_data->size() - copied;
     size_t bytes  = std::min(remain, block_size - block_off);

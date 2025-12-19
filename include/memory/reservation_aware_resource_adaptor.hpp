@@ -75,10 +75,9 @@ class reservation_aware_resource_adaptor : public rmm::mr::device_memory_resourc
 
     [[nodiscard]] std::size_t get_available_memory() const noexcept
     {
-      int64_t current = allocated_bytes.value();
-      int64_t size    = this->size();
-      int64_t outcome = current < size ? size - current : 0LL;
-      return outcome;
+      auto current = static_cast<std::size_t>(allocated_bytes.value());
+      auto sz      = this->size();
+      return current < sz ? sz - current : 0UL;
     }
 
     atomic_bounded_counter<std::int64_t> allocated_bytes{0LL};

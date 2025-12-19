@@ -102,8 +102,6 @@ class fixed_size_host_memory_resource : public rmm::mr::device_memory_resource {
    * @brief Simple RAII wrapper for multiple block allocations.
    */
   struct multiple_blocks_allocation {
-    const std::size_t block_size;
-
     static std::unique_ptr<multiple_blocks_allocation> empty()
     {
       return std::unique_ptr<multiple_blocks_allocation>(
@@ -131,7 +129,7 @@ class fixed_size_host_memory_resource : public rmm::mr::device_memory_resource {
     multiple_blocks_allocation(multiple_blocks_allocation&&)                 = delete;
     multiple_blocks_allocation& operator=(multiple_blocks_allocation&&)      = delete;
 
-    std::size_t size_bytes() const noexcept { return blocks_.size() * block_size; }
+    std::size_t size_bytes() const noexcept { return blocks_.size() * block_size_; }
 
     std::size_t size() const noexcept { return blocks_.size(); }
 
@@ -139,19 +137,24 @@ class fixed_size_host_memory_resource : public rmm::mr::device_memory_resource {
 
     std::span<std::byte> operator[](std::size_t i) const
     {
-      return std::span<std::byte>{blocks_.at(i), block_size};
+      return std::span<std::byte>{blocks_.at(i), block_size_};
     }
 
     std::span<std::byte> at(std::size_t i) const
     {
-      return std::span<std::byte>{blocks_.at(i), block_size};
+      return std::span<std::byte>{blocks_.at(i), block_size_};
     }
+
+    std::size_t block_size() const noexcept { return block_size_; }
 
    private:
     explicit multiple_blocks_allocation(std::vector<std::byte*> buffers,
                                         fixed_size_host_memory_resource* m,
                                         reservation* res)
-      : blocks_(std::move(buffers)), mr_(m), block_size(m->get_block_size())
+      : blocks_(std::move(buffers)),
+        mr_(m),
+        block_size_(m ? m->get_block_size() : 0),
+        reseved_memory_(nullptr)
     {
       if (res) {
         auto* h_res = dynamic_cast<chunked_reserved_area*>(res->arena_.get());
@@ -163,7 +166,8 @@ class fixed_size_host_memory_resource : public rmm::mr::device_memory_resource {
 
     std::vector<std::byte*> blocks_;
     fixed_size_host_memory_resource* mr_;
-    chunked_reserved_area* reseved_memory_{nullptr};
+    std::size_t block_size_;
+    chunked_reserved_area* reseved_memory_;
   };
 
   using fixed_multiple_blocks_allocation = std::unique_ptr<multiple_blocks_allocation>;
@@ -196,7 +200,10 @@ class fixed_size_host_memory_resource : public rmm::mr::device_memory_resource {
    */
   ~fixed_size_host_memory_resource() override;
 
-  [[nodiscard]] int get_total_allocated_bytes() const noexcept { return allocated_bytes_.load(); }
+  [[nodiscard]] std::size_t get_total_allocated_bytes() const noexcept
+  {
+    return allocated_bytes_.load();
+  }
 
   /**
    * @brief return the total available memory in the memory resource

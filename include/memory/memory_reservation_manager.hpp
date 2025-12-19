@@ -191,7 +191,7 @@ class memory_reservation_manager {
     int device_id;
     size_t memory_limit;
     float downgrade_tigger_threshold{0.75};
-    float downgrade_stop_threshold{0.65};
+    float downgrade_stop_threshold{0.65f};
     std::size_t memory_capacity;  // Optional total capacity, defaults to device capacity
     DeviceMemoryResourceFactoryFn mr_factory_fn;
 
@@ -304,8 +304,10 @@ class memory_reservation_manager {
 
   // Fast lookups
   std::vector<memory_space*> _memory_space_views;
+  std::vector<const memory_space*> _const_memory_space_views;
   std::unordered_map<memory_space_id, memory_space*> _memory_space_lookup;
   std::unordered_map<Tier, std::vector<memory_space*>> _tier_to_memory_spaces;
+  std::unordered_map<Tier, std::vector<const memory_space*>> _const_tier_to_memory_spaces;
 
   // Helper method: attempts to select a space and immediately make a reservation
   // Returns a reservation when successful, or std::nullopt if none can satisfy the request

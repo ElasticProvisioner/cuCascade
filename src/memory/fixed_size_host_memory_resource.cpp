@@ -32,31 +32,6 @@
 namespace cucascade {
 namespace memory {
 
-namespace {
-// Returns available system memory in bytes if detectable; 0 if unknown
-std::size_t get_available_system_memory_bytes()
-{
-  // todo (fix this)
-  // std::ifstream meminfo("/proc/meminfo");
-  // if (!meminfo) { return 0; }
-  // std::string line;
-  // while (std::getline(meminfo, line)) {
-  //   if (line.rfind("MemAvailable:", 0) == 0) {
-  //     std::istringstream iss(line);
-  //     std::string key, unit;
-  //     std::size_t value_kb = 0;
-  //     iss >> key >> value_kb >> unit;  // e.g., "MemAvailable:" 123456 "kB"
-  //     if (value_kb > 0) {
-  //       // kB in /proc/meminfo are kibibytes
-  //       return static_cast<std::size_t>(value_kb) * 1024ULL;
-  //     }
-  //     break;
-  //   }
-  // }
-  return 0;
-}
-}  // namespace
-
 fixed_size_host_memory_resource::fixed_size_host_memory_resource(
   int device_id,
   rmm::mr::device_memory_resource& upstream_mr,
@@ -134,7 +109,6 @@ fixed_size_host_memory_resource::allocate_multiple_blocks(std::size_t total_byte
 
   total_bytes                        = rmm::align_up(total_bytes, block_size_);
   size_t num_blocks                  = total_bytes / block_size_;
-  std::size_t tracked_bytes          = total_bytes;
   std::size_t upstream_tracked_bytes = total_bytes;
   allocation_tracker* tracker        = nullptr;
   std::lock_guard<std::mutex> lock(mutex_);
@@ -147,13 +121,15 @@ fixed_size_host_memory_resource::allocate_multiple_blocks(std::size_t total_byte
     if (iter == active_reservations_.end()) {
       throw std::runtime_error("reservation has been freed already");
     }
-    tracker                      = std::addressof(iter->second);
-    int64_t pre_allocation_size  = tracker->allocated_bytes.fetch_add(total_bytes);
-    int64_t post_allocation_size = pre_allocation_size + total_bytes;
-    if (post_allocation_size <= h_reservation_slot->size()) {
+    tracker               = std::addressof(iter->second);
+    auto reservation_size = static_cast<int64_t>(h_reservation_slot->size());
+    int64_t pre_allocation_size =
+      tracker->allocated_bytes.fetch_add(static_cast<int64_t>(total_bytes));
+    int64_t post_allocation_size = pre_allocation_size + static_cast<int64_t>(total_bytes);
+    if (post_allocation_size <= reservation_size) {
       upstream_tracked_bytes = 0;
-    } else if (pre_allocation_size < h_reservation_slot->size()) {
-      upstream_tracked_bytes = post_allocation_size - h_reservation_slot->size();
+    } else if (pre_allocation_size < reservation_size) {
+      upstream_tracked_bytes = static_cast<std::size_t>(post_allocation_size - reservation_size);
     }
   }
 
@@ -172,7 +148,7 @@ fixed_size_host_memory_resource::allocate_multiple_blocks(std::size_t total_byte
           free_blocks_.push_back(ptr);
         }
         allocated_bytes_.sub(upstream_tracked_bytes);
-        if (tracker) tracker->allocated_bytes.fetch_sub(total_bytes);
+        if (tracker) tracker->allocated_bytes.fetch_sub(static_cast<int64_t>(total_bytes));
         throw rmm::out_of_memory(
           "Not enough free blocks available in fixed_size_host_memory_resource and pool expansion "
           "failed.");
@@ -185,20 +161,21 @@ fixed_size_host_memory_resource::allocate_multiple_blocks(std::size_t total_byte
     peak_allocated_bytes_.update_peak(post_allocation_size);
     return multiple_blocks_allocation::create(std::move(allocated_blocks), *this, res);
   } else {
-    if (tracker) tracker->allocated_bytes.fetch_sub(total_bytes);
+    if (tracker) tracker->allocated_bytes.fetch_sub(static_cast<int64_t>(total_bytes));
   }
   return std::unique_ptr<fixed_size_host_memory_resource::multiple_blocks_allocation>(nullptr);
 }
 
-void* fixed_size_host_memory_resource::do_allocate(std::size_t bytes, rmm::cuda_stream_view stream)
+void* fixed_size_host_memory_resource::do_allocate(std::size_t /*bytes*/,
+                                                   rmm::cuda_stream_view /*stream*/)
 {
   throw rmm::logic_error(
     "fixed_size_host_memory_resource doesn't support allocate, use allocate_multiple_blocks");
 }
 
-void fixed_size_host_memory_resource::do_deallocate(void* ptr,
-                                                    std::size_t bytes,
-                                                    rmm::cuda_stream_view stream) noexcept
+void fixed_size_host_memory_resource::do_deallocate(void* /*ptr*/,
+                                                    std::size_t /*bytes*/,
+                                                    rmm::cuda_stream_view /*stream*/) noexcept
 {
 }
 
@@ -250,7 +227,7 @@ void fixed_size_host_memory_resource::shrink_reservation_to_fit(reserved_arena& 
   auto iter = active_reservations_.find(h_reservation_slot);
   assert(iter != active_reservations_.end());
   auto& tracker = iter->second;
-  auto current  = tracker.allocated_bytes.load();
+  auto current  = static_cast<std::size_t>(std::max(int64_t{0}, tracker.allocated_bytes.load()));
   if (current < h_reservation_slot->size()) {
     auto old_res = std::exchange(h_reservation_slot->size_, current);
     allocated_bytes_.sub(old_res - current);
@@ -285,7 +262,7 @@ void fixed_size_host_memory_resource::expand_pool()
 void fixed_size_host_memory_resource::register_reservation(chunked_reserved_area* res)
 {
   std::lock_guard lock(mutex_);
-  auto r = active_reservations_.insert(std::make_pair(res, res->uuid()));
+  [[maybe_unused]] auto r = active_reservations_.insert(std::make_pair(res, res->uuid()));
   assert(r.second && "insertion failed");
 }
 
@@ -299,7 +276,8 @@ void fixed_size_host_memory_resource::release_reservation(chunked_reserved_area*
     throw std::runtime_error("reservation was not registered or already freed");
   }
 
-  auto current                = iter->second.allocated_bytes.load();
+  auto current =
+    static_cast<std::size_t>(std::max(int64_t{0}, iter->second.allocated_bytes.load()));
   std::size_t reclaimed_bytes = arena->size() > current ? arena->size() - current : 0;
   allocated_bytes_.sub(reclaimed_bytes);
   active_reservations_.erase(iter);
@@ -311,15 +289,17 @@ void fixed_size_host_memory_resource::return_allocated_chunks(std::vector<std::b
   size_t reclaimed_bytes = chunks.size() * block_size_;
   std::lock_guard lock(mutex_);
   if (arena != nullptr && active_reservations_.contains(arena)) {
-    auto& tracker                  = active_reservations_.at(arena);
-    int64_t pre_reclaimation_size  = tracker.allocated_bytes.fetch_sub(reclaimed_bytes);
-    int64_t post_reclaimation_size = pre_reclaimation_size - reclaimed_bytes;
-    if (pre_reclaimation_size <= arena->size()) {
+    auto& tracker         = active_reservations_.at(arena);
+    auto reservation_size = static_cast<int64_t>(arena->size());
+    int64_t pre_reclaimation_size =
+      tracker.allocated_bytes.fetch_sub(static_cast<int64_t>(reclaimed_bytes));
+    int64_t post_reclaimation_size = pre_reclaimation_size - static_cast<int64_t>(reclaimed_bytes);
+    if (pre_reclaimation_size <= reservation_size) {
       // allocation fit in reservation
       reclaimed_bytes = 0;
-    } else if (post_reclaimation_size < arena->size()) {
+    } else if (post_reclaimation_size < reservation_size) {
       // part of allocation fit in the reservation
-      reclaimed_bytes = pre_reclaimation_size - arena->size();
+      reclaimed_bytes = static_cast<std::size_t>(pre_reclaimation_size - reservation_size);
     }
   }
   allocated_bytes_.sub(reclaimed_bytes);

@@ -34,8 +34,16 @@ class null_device_memory_resource : public rmm::mr::device_memory_resource {
   ~null_device_memory_resource() override = default;
 
  protected:
-  void* do_allocate(std::size_t bytes, rmm::cuda_stream_view stream) override { return nullptr; }
-  void do_deallocate(void* p, std::size_t bytes, rmm::cuda_stream_view stream) noexcept override {}
+  void* do_allocate([[maybe_unused]] std::size_t bytes,
+                    [[maybe_unused]] rmm::cuda_stream_view stream) override
+  {
+    return nullptr;
+  }
+  void do_deallocate([[maybe_unused]] void* p,
+                     [[maybe_unused]] std::size_t bytes,
+                     [[maybe_unused]] rmm::cuda_stream_view stream) noexcept override
+  {
+  }
   [[nodiscard]] bool do_is_equal(
     const rmm::mr::device_memory_resource& other) const noexcept override
   {
