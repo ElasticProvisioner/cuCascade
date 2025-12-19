@@ -17,14 +17,12 @@
 
 #include "data/common.hpp"
 #include "data/data_batch.hpp"
-#include "data/data_batch_view.hpp"
 #include "data/data_repository.hpp"
-#include "data/data_repository_manager.hpp"
 #include "memory/null_device_memory_resource.hpp"
-#include "memory/reservation_aware_resource_adaptor.hpp"
 
 #include <catch2/catch.hpp>
 
+#include <atomic>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -86,158 +84,127 @@ class mock_data_representation : private mock_memory_space_holder, public idata_
   size_t _size;
 };
 
-// Test basic construction
-TEST_CASE("idata_repository Construction", "[data_repository]")
+// =============================================================================
+// Tests for shared_ptr based repository
+// =============================================================================
+
+// Test basic construction with shared_ptr
+TEST_CASE("shared_data_repository Construction", "[data_repository]")
 {
-  idata_repository repository;
+  shared_data_repository repository;
 
   // Repository should be empty initially
-  auto batch = repository.pull_data_batch_view();
+  auto [batch, handle] = repository.pull_data_batch();
   REQUIRE(batch == nullptr);
 }
 
-// Test adding and pulling a single batch
-TEST_CASE("idata_repository Add and Pull Single Batch", "[data_repository]")
+// Test adding and pulling a single batch with shared_ptr
+TEST_CASE("shared_data_repository Add and Pull Single Batch", "[data_repository]")
 {
-  data_repository_manager manager;
-  idata_repository repository;
+  shared_data_repository repository;
 
-  // Create a batch and view
-  auto data   = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
-  auto* batch = new data_batch(1, manager, std::move(data));
-  batch->increment_view_ref_count();  // Prevent auto-delete
-
-  auto view = std::make_unique<data_batch_view>(batch);
+  // Create a batch
+  auto data  = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
+  auto batch = std::make_shared<data_batch>(1, std::move(data));
 
   // Add to repository
-  repository.add_new_data_batch_view(std::move(view));
+  repository.add_data_batch(batch);
 
   // Pull from repository
-  auto pulled_view = repository.pull_data_batch_view();
-  REQUIRE(pulled_view != nullptr);
+  auto [pulled_batch, handle] = repository.pull_data_batch();
+  REQUIRE(pulled_batch != nullptr);
+  REQUIRE(pulled_batch->get_batch_id() == 1);
+  REQUIRE(pulled_batch->get_processing_count() == 1);
+  REQUIRE(pulled_batch->get_state() == batch_state::processing);
 
   // Repository should now be empty
-  auto empty = repository.pull_data_batch_view();
+  auto [empty, empty_handle] = repository.pull_data_batch();
   REQUIRE(empty == nullptr);
-
-  // Clean up
-  batch->decrement_view_ref_count();
-  batch->decrement_view_ref_count();
 }
 
-// Test FIFO behavior
-TEST_CASE("idata_repository FIFO Order", "[data_repository]")
+// Test FIFO behavior with shared_ptr
+TEST_CASE("shared_data_repository FIFO Order", "[data_repository]")
 {
-  data_repository_manager manager;
-  idata_repository repository;
-
-  std::vector<data_batch*> batches;
+  shared_data_repository repository;
 
   // Create multiple batches and add them
   for (uint64_t i = 1; i <= 5; ++i) {
-    auto data   = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
-    auto* batch = new data_batch(i, manager, std::move(data));
-    batch->increment_view_ref_count();  // Prevent auto-delete
-    batches.push_back(batch);
-
-    auto view = std::make_unique<data_batch_view>(batch);
-    repository.add_new_data_batch_view(std::move(view));
+    auto data  = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
+    auto batch = std::make_shared<data_batch>(i, std::move(data));
+    repository.add_data_batch(batch);
   }
 
   // Pull them back and verify FIFO order
   for (uint64_t i = 1; i <= 5; ++i) {
-    auto pulled_view = repository.pull_data_batch_view();
-    REQUIRE(pulled_view != nullptr);
-    // Note: We can't directly check batch ID from view, but order should be maintained
+    auto [pulled_batch, handle] = repository.pull_data_batch();
+    REQUIRE(pulled_batch != nullptr);
+    REQUIRE(pulled_batch->get_batch_id() == i);
   }
 
   // Repository should be empty
-  auto empty = repository.pull_data_batch_view();
+  auto [empty, empty_handle] = repository.pull_data_batch();
   REQUIRE(empty == nullptr);
-
-  // Clean up
-  for (auto* batch : batches) {
-    batch->decrement_view_ref_count();
-  }
 }
 
-// Test multiple add and pull operations
-TEST_CASE("idata_repository Multiple Add Pull Operations", "[data_repository]")
+// Test shared_ptr allows same batch in multiple repositories
+TEST_CASE("shared_data_repository Same Batch Multiple Repositories", "[data_repository]")
 {
-  data_repository_manager manager;
-  idata_repository repository;
+  shared_data_repository repo1;
+  shared_data_repository repo2;
+  shared_data_repository repo3;
 
-  std::vector<data_batch*> batches;
+  // Create a single batch
+  auto data  = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
+  auto batch = std::make_shared<data_batch>(42, std::move(data));
 
-  // Add 3 batches
-  for (uint64_t i = 1; i <= 3; ++i) {
-    auto data   = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
-    auto* batch = new data_batch(i, manager, std::move(data));
-    batch->increment_view_ref_count();  // Prevent auto-delete
-    batches.push_back(batch);
+  // Add same batch to multiple repositories
+  repo1.add_data_batch(batch);
+  repo2.add_data_batch(batch);
+  repo3.add_data_batch(batch);
 
-    auto view = std::make_unique<data_batch_view>(batch);
-    repository.add_new_data_batch_view(std::move(view));
-  }
+  // All repositories should have the same batch
+  auto [pulled1, handle1] = repo1.pull_data_batch();
+  auto [pulled2, handle2] = repo2.pull_data_batch();
+  auto [pulled3, handle3] = repo3.pull_data_batch();
 
-  // Pull 2 batches
-  auto view1 = repository.pull_data_batch_view();
-  auto view2 = repository.pull_data_batch_view();
-  REQUIRE(view1 != nullptr);
-  REQUIRE(view2 != nullptr);
+  REQUIRE(pulled1 != nullptr);
+  REQUIRE(pulled2 != nullptr);
+  REQUIRE(pulled3 != nullptr);
 
-  // Add 2 more batches
-  for (uint64_t i = 4; i <= 5; ++i) {
-    auto data   = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
-    auto* batch = new data_batch(i, manager, std::move(data));
-    batch->increment_view_ref_count();  // Prevent auto-delete
-    batches.push_back(batch);
+  // They should all point to the same batch
+  REQUIRE(pulled1->get_batch_id() == 42);
+  REQUIRE(pulled2->get_batch_id() == 42);
+  REQUIRE(pulled3->get_batch_id() == 42);
 
-    auto view = std::make_unique<data_batch_view>(batch);
-    repository.add_new_data_batch_view(std::move(view));
-  }
+  // The pointers should be the same
+  REQUIRE(pulled1.get() == pulled2.get());
+  REQUIRE(pulled2.get() == pulled3.get());
 
-  // Pull remaining 3 batches (1 from first batch + 2 new)
-  auto view3 = repository.pull_data_batch_view();
-  auto view4 = repository.pull_data_batch_view();
-  auto view5 = repository.pull_data_batch_view();
-  REQUIRE(view3 != nullptr);
-  REQUIRE(view4 != nullptr);
-  REQUIRE(view5 != nullptr);
-
-  // Repository should be empty
-  auto empty = repository.pull_data_batch_view();
-  REQUIRE(empty == nullptr);
-
-  // Clean up
-  for (auto* batch : batches) {
-    batch->decrement_view_ref_count();
-  }
+  // Processing count should be 3 (one for each pull)
+  REQUIRE(pulled1->get_processing_count() == 3);
 }
 
 // Test pulling from empty repository
-TEST_CASE("idata_repository Pull From Empty", "[data_repository]")
+TEST_CASE("shared_data_repository Pull From Empty", "[data_repository]")
 {
-  idata_repository repository;
+  shared_data_repository repository;
 
   // Pull from empty repository multiple times
   for (int i = 0; i < 10; ++i) {
-    auto view = repository.pull_data_batch_view();
-    REQUIRE(view == nullptr);
+    auto [batch, handle] = repository.pull_data_batch();
+    REQUIRE(batch == nullptr);
   }
 }
 
-// Test thread-safe adding
-TEST_CASE("idata_repository Thread-Safe Adding", "[data_repository]")
+// Test thread-safe adding with shared_ptr
+TEST_CASE("shared_data_repository Thread-Safe Adding", "[data_repository]")
 {
-  data_repository_manager manager;
-  idata_repository repository;
+  shared_data_repository repository;
 
   constexpr int num_threads        = 10;
   constexpr int batches_per_thread = 50;
 
   std::vector<std::thread> threads;
-  std::vector<std::vector<data_batch*>> thread_batches(num_threads);
 
   // Launch threads to add batches
   for (int i = 0; i < num_threads; ++i) {
@@ -245,12 +212,8 @@ TEST_CASE("idata_repository Thread-Safe Adding", "[data_repository]")
       for (int j = 0; j < batches_per_thread; ++j) {
         auto data         = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
         uint64_t batch_id = i * batches_per_thread + j;
-        auto* batch       = new data_batch(batch_id, manager, std::move(data));
-        batch->increment_view_ref_count();  // Prevent auto-delete
-        thread_batches[i].push_back(batch);
-
-        auto view = std::make_unique<data_batch_view>(batch);
-        repository.add_new_data_batch_view(std::move(view));
+        auto batch        = std::make_shared<data_batch>(batch_id, std::move(data));
+        repository.add_data_batch(batch);
       }
     });
   }
@@ -262,39 +225,28 @@ TEST_CASE("idata_repository Thread-Safe Adding", "[data_repository]")
 
   // Pull all batches and count
   int count = 0;
-  while (auto view = repository.pull_data_batch_view()) {
+  while (true) {
+    auto [batch, handle] = repository.pull_data_batch();
+    if (!batch) break;
     ++count;
   }
 
   // Should have exactly num_threads * batches_per_thread
   REQUIRE(count == num_threads * batches_per_thread);
-
-  // Clean up
-  for (auto& batches : thread_batches) {
-    for (auto* batch : batches) {
-      batch->decrement_view_ref_count();
-    }
-  }
 }
 
-// Test thread-safe pulling
-TEST_CASE("idata_repository Thread-Safe Pulling", "[data_repository]")
+// Test thread-safe pulling with shared_ptr
+TEST_CASE("shared_data_repository Thread-Safe Pulling", "[data_repository]")
 {
-  data_repository_manager manager;
-  idata_repository repository;
+  shared_data_repository repository;
 
   constexpr int num_batches = 500;
-  std::vector<data_batch*> batches;
 
   // Add many batches
   for (int i = 0; i < num_batches; ++i) {
-    auto data   = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
-    auto* batch = new data_batch(i, manager, std::move(data));
-    batch->increment_view_ref_count();  // Prevent auto-delete
-    batches.push_back(batch);
-
-    auto view = std::make_unique<data_batch_view>(batch);
-    repository.add_new_data_batch_view(std::move(view));
+    auto data  = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
+    auto batch = std::make_shared<data_batch>(i, std::move(data));
+    repository.add_data_batch(batch);
   }
 
   constexpr int num_threads = 10;
@@ -304,7 +256,9 @@ TEST_CASE("idata_repository Thread-Safe Pulling", "[data_repository]")
   // Launch threads to pull batches
   for (int i = 0; i < num_threads; ++i) {
     threads.emplace_back([&, i]() {
-      while (auto view = repository.pull_data_batch_view()) {
+      while (true) {
+        auto [batch, handle] = repository.pull_data_batch();
+        if (!batch) break;
         ++thread_counts[i];
       }
     });
@@ -325,27 +279,222 @@ TEST_CASE("idata_repository Thread-Safe Pulling", "[data_repository]")
   REQUIRE(total_count == num_batches);
 
   // Repository should be empty
-  auto empty = repository.pull_data_batch_view();
+  auto [empty, empty_handle] = repository.pull_data_batch();
   REQUIRE(empty == nullptr);
-
-  // Clean up
-  for (auto* batch : batches) {
-    batch->decrement_view_ref_count();
-  }
 }
 
-// Test concurrent adding and pulling
-TEST_CASE("idata_repository Concurrent Add and Pull", "[data_repository]")
+// =============================================================================
+// Tests for unique_ptr based repository
+// =============================================================================
+
+// Test basic construction with unique_ptr
+TEST_CASE("unique_data_repository Construction", "[data_repository]")
 {
-  data_repository_manager manager;
-  idata_repository repository;
+  unique_data_repository repository;
+
+  // Repository should be empty initially
+  auto [batch, handle] = repository.pull_data_batch();
+  REQUIRE(batch == nullptr);
+}
+
+// Test adding and pulling a single batch with unique_ptr
+TEST_CASE("unique_data_repository Add and Pull Single Batch", "[data_repository]")
+{
+  unique_data_repository repository;
+
+  // Create a batch
+  auto data  = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
+  auto batch = std::make_unique<data_batch>(1, std::move(data));
+
+  // Add to repository
+  repository.add_data_batch(std::move(batch));
+
+  // Pull from repository
+  auto [pulled_batch, handle] = repository.pull_data_batch();
+  REQUIRE(pulled_batch != nullptr);
+  REQUIRE(pulled_batch->get_batch_id() == 1);
+
+  // Repository should now be empty
+  auto [empty, empty_handle] = repository.pull_data_batch();
+  REQUIRE(empty == nullptr);
+}
+
+// Test FIFO behavior with unique_ptr
+TEST_CASE("unique_data_repository FIFO Order", "[data_repository]")
+{
+  unique_data_repository repository;
+
+  // Create multiple batches and add them
+  for (uint64_t i = 1; i <= 5; ++i) {
+    auto data  = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
+    auto batch = std::make_unique<data_batch>(i, std::move(data));
+    repository.add_data_batch(std::move(batch));
+  }
+
+  // Pull them back and verify FIFO order
+  for (uint64_t i = 1; i <= 5; ++i) {
+    auto [pulled_batch, handle] = repository.pull_data_batch();
+    REQUIRE(pulled_batch != nullptr);
+    REQUIRE(pulled_batch->get_batch_id() == i);
+  }
+
+  // Repository should be empty
+  auto [empty, empty_handle] = repository.pull_data_batch();
+  REQUIRE(empty == nullptr);
+}
+
+// Test large number of batches with unique_ptr
+TEST_CASE("unique_data_repository Large Number of Batches", "[data_repository]")
+{
+  unique_data_repository repository;
+
+  constexpr int num_batches = 10000;
+
+  // Add many batches
+  for (int i = 0; i < num_batches; ++i) {
+    auto data  = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
+    auto batch = std::make_unique<data_batch>(i, std::move(data));
+    repository.add_data_batch(std::move(batch));
+  }
+
+  // Pull all batches
+  int count = 0;
+  while (true) {
+    auto [batch, handle] = repository.pull_data_batch();
+    if (!batch) break;
+    ++count;
+  }
+
+  REQUIRE(count == num_batches);
+}
+
+// Test interleaved add and pull with unique_ptr
+TEST_CASE("unique_data_repository Interleaved Add and Pull", "[data_repository]")
+{
+  unique_data_repository repository;
+
+  for (int cycle = 0; cycle < 50; ++cycle) {
+    // Add some batches
+    for (int i = 0; i < 3; ++i) {
+      auto data  = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
+      auto batch = std::make_unique<data_batch>(cycle * 3 + i, std::move(data));
+      repository.add_data_batch(std::move(batch));
+    }
+
+    // Pull one batch
+    auto [batch, handle] = repository.pull_data_batch();
+    REQUIRE(batch != nullptr);
+  }
+
+  // Pull remaining batches
+  int remaining = 0;
+  while (true) {
+    auto [batch, handle] = repository.pull_data_batch();
+    if (!batch) break;
+    ++remaining;
+  }
+
+  // Should have 50 cycles * 3 adds - 50 pulls = 100 remaining
+  REQUIRE(remaining == 100);
+}
+
+// Test thread-safe adding with unique_ptr
+TEST_CASE("unique_data_repository Thread-Safe Adding", "[data_repository]")
+{
+  unique_data_repository repository;
+
+  constexpr int num_threads        = 10;
+  constexpr int batches_per_thread = 50;
+
+  std::vector<std::thread> threads;
+
+  // Launch threads to add batches
+  for (int i = 0; i < num_threads; ++i) {
+    threads.emplace_back([&, i]() {
+      for (int j = 0; j < batches_per_thread; ++j) {
+        auto data         = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
+        uint64_t batch_id = i * batches_per_thread + j;
+        auto batch        = std::make_unique<data_batch>(batch_id, std::move(data));
+        repository.add_data_batch(std::move(batch));
+      }
+    });
+  }
+
+  // Wait for all threads to complete
+  for (auto& thread : threads) {
+    thread.join();
+  }
+
+  // Pull all batches and count
+  int count = 0;
+  while (true) {
+    auto [batch, handle] = repository.pull_data_batch();
+    if (!batch) break;
+    ++count;
+  }
+
+  // Should have exactly num_threads * batches_per_thread
+  REQUIRE(count == num_threads * batches_per_thread);
+}
+
+// Test thread-safe pulling with unique_ptr
+TEST_CASE("unique_data_repository Thread-Safe Pulling", "[data_repository]")
+{
+  unique_data_repository repository;
+
+  constexpr int num_batches = 500;
+
+  // Add many batches
+  for (int i = 0; i < num_batches; ++i) {
+    auto data  = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
+    auto batch = std::make_unique<data_batch>(i, std::move(data));
+    repository.add_data_batch(std::move(batch));
+  }
+
+  constexpr int num_threads = 10;
+  std::vector<std::thread> threads;
+  std::vector<int> thread_counts(num_threads, 0);
+
+  // Launch threads to pull batches
+  for (int i = 0; i < num_threads; ++i) {
+    threads.emplace_back([&, i]() {
+      while (true) {
+        auto [batch, handle] = repository.pull_data_batch();
+        if (!batch) break;
+        ++thread_counts[i];
+      }
+    });
+  }
+
+  // Wait for all threads to complete
+  for (auto& thread : threads) {
+    thread.join();
+  }
+
+  // Sum all thread counts
+  int total_count = 0;
+  for (int count : thread_counts) {
+    total_count += count;
+  }
+
+  // Should have pulled exactly num_batches
+  REQUIRE(total_count == num_batches);
+
+  // Repository should be empty
+  auto [empty, empty_handle] = repository.pull_data_batch();
+  REQUIRE(empty == nullptr);
+}
+
+// Test concurrent adding and pulling with unique_ptr
+TEST_CASE("unique_data_repository Concurrent Add and Pull", "[data_repository]")
+{
+  unique_data_repository repository;
 
   constexpr int num_add_threads    = 5;
   constexpr int num_pull_threads   = 5;
   constexpr int batches_per_thread = 100;
 
   std::vector<std::thread> threads;
-  std::vector<std::vector<data_batch*>> thread_batches(num_add_threads);
   std::atomic<int> pulled_count{0};
 
   // Launch adding threads
@@ -354,12 +503,8 @@ TEST_CASE("idata_repository Concurrent Add and Pull", "[data_repository]")
       for (int j = 0; j < batches_per_thread; ++j) {
         auto data         = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
         uint64_t batch_id = i * batches_per_thread + j;
-        auto* batch       = new data_batch(batch_id, manager, std::move(data));
-        batch->increment_view_ref_count();  // Prevent auto-delete
-        thread_batches[i].push_back(batch);
-
-        auto view = std::make_unique<data_batch_view>(batch);
-        repository.add_new_data_batch_view(std::move(view));
+        auto batch        = std::make_unique<data_batch>(batch_id, std::move(data));
+        repository.add_data_batch(std::move(batch));
 
         // Small delay to allow pullers to work
         std::this_thread::sleep_for(std::chrono::microseconds(10));
@@ -372,8 +517,8 @@ TEST_CASE("idata_repository Concurrent Add and Pull", "[data_repository]")
     threads.emplace_back([&]() {
       int local_count = 0;
       while (local_count < batches_per_thread) {
-        auto view = repository.pull_data_batch_view();
-        if (view) {
+        auto [batch, handle] = repository.pull_data_batch();
+        if (batch) {
           ++local_count;
           ++pulled_count;
         } else {
@@ -391,169 +536,94 @@ TEST_CASE("idata_repository Concurrent Add and Pull", "[data_repository]")
 
   // Should have pulled exactly num_add_threads * batches_per_thread
   REQUIRE(pulled_count == num_add_threads * batches_per_thread);
-
-  // Clean up
-  for (auto& batches : thread_batches) {
-    for (auto* batch : batches) {
-      batch->decrement_view_ref_count();
-    }
-  }
 }
 
-// Test large number of batches
-TEST_CASE("idata_repository Large Number of Batches", "[data_repository]")
+// Test high contention scenario with unique_ptr
+TEST_CASE("unique_data_repository High Contention", "[data_repository]")
 {
-  data_repository_manager manager;
-  idata_repository repository;
+  unique_data_repository repository;
 
-  constexpr int num_batches = 10000;
-  std::vector<data_batch*> batches;
+  constexpr int num_threads           = 20;
+  constexpr int operations_per_thread = 50;
 
-  // Add many batches
-  for (int i = 0; i < num_batches; ++i) {
-    auto data   = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
-    auto* batch = new data_batch(i, manager, std::move(data));
-    batch->increment_view_ref_count();  // Prevent auto-delete
-    batches.push_back(batch);
+  std::vector<std::thread> threads;
+  std::atomic<int> total_added{0};
+  std::atomic<int> total_pulled{0};
 
-    auto view = std::make_unique<data_batch_view>(batch);
-    repository.add_new_data_batch_view(std::move(view));
+  // Launch threads doing both add and pull operations
+  for (int i = 0; i < num_threads; ++i) {
+    threads.emplace_back([&, i]() {
+      for (int j = 0; j < operations_per_thread; ++j) {
+        // Add a batch
+        auto data         = std::make_unique<mock_data_representation>(memory::Tier::GPU, 512);
+        uint64_t batch_id = i * operations_per_thread + j;
+        auto batch        = std::make_unique<data_batch>(batch_id, std::move(data));
+        repository.add_data_batch(std::move(batch));
+        ++total_added;
+
+        // Immediately try to pull a batch (might be ours or someone else's)
+        auto [pulled, handle] = repository.pull_data_batch();
+        if (pulled) { ++total_pulled; }
+      }
+    });
   }
 
-  // Pull all batches
-  int count = 0;
-  while (auto view = repository.pull_data_batch_view()) {
-    ++count;
+  // Wait for all threads
+  for (auto& thread : threads) {
+    thread.join();
   }
 
-  REQUIRE(count == num_batches);
+  // Verify counts
+  REQUIRE(total_added == num_threads * operations_per_thread);
 
-  // Clean up
-  for (auto* batch : batches) {
-    batch->decrement_view_ref_count();
+  // Clean up remaining batches
+  while (true) {
+    auto [batch, handle] = repository.pull_data_batch();
+    if (!batch) break;
+    ++total_pulled;
   }
+
+  // All batches should have been processed
+  REQUIRE(total_pulled == total_added);
 }
 
-// Test add after pull all
-TEST_CASE("idata_repository Add After Pull All", "[data_repository]")
+// Test that processing handle properly releases count
+TEST_CASE("shared_data_repository Processing Handle Release", "[data_repository]")
 {
-  data_repository_manager manager;
-  idata_repository repository;
+  shared_data_repository repository;
 
-  std::vector<data_batch*> batches;
+  auto data  = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
+  auto batch = std::make_shared<data_batch>(1, std::move(data));
+  repository.add_data_batch(batch);
 
-  // Add some batches
-  for (int i = 0; i < 5; ++i) {
-    auto data   = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
-    auto* batch = new data_batch(i, manager, std::move(data));
-    batch->increment_view_ref_count();  // Prevent auto-delete
-    batches.push_back(batch);
+  {
+    auto [pulled_batch, handle] = repository.pull_data_batch();
+    REQUIRE(pulled_batch != nullptr);
+    REQUIRE(pulled_batch->get_processing_count() == 1);
+    REQUIRE(pulled_batch->get_state() == batch_state::processing);
+  }  // handle goes out of scope
 
-    auto view = std::make_unique<data_batch_view>(batch);
-    repository.add_new_data_batch_view(std::move(view));
-  }
-
-  // Pull all
-  int count1 = 0;
-  while (auto view = repository.pull_data_batch_view()) {
-    ++count1;
-  }
-  REQUIRE(count1 == 5);
-
-  // Add more batches
-  for (int i = 5; i < 10; ++i) {
-    auto data   = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
-    auto* batch = new data_batch(i, manager, std::move(data));
-    batch->increment_view_ref_count();  // Prevent auto-delete
-    batches.push_back(batch);
-
-    auto view = std::make_unique<data_batch_view>(batch);
-    repository.add_new_data_batch_view(std::move(view));
-  }
-
-  // Pull again
-  int count2 = 0;
-  while (auto view = repository.pull_data_batch_view()) {
-    ++count2;
-  }
-  REQUIRE(count2 == 5);
-
-  // Clean up
-  for (auto* batch : batches) {
-    batch->decrement_view_ref_count();
-  }
+  // Since we still have the original batch shared_ptr, we can check state
+  REQUIRE(batch->get_processing_count() == 0);
+  REQUIRE(batch->get_state() == batch_state::at_rest);
 }
 
-// Test repository with different batch sizes
-TEST_CASE("idata_repository Different Batch Sizes", "[data_repository]")
+// Test that batch cannot be pulled if it's being downgraded
+TEST_CASE("shared_data_repository Cannot Pull During Downgrade", "[data_repository]")
 {
-  data_repository_manager manager;
-  idata_repository repository;
+  shared_data_repository repository;
 
-  std::vector<size_t> sizes = {100, 1024, 10240, 102400, 1024000};
-  std::vector<data_batch*> batches;
+  auto data  = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
+  auto batch = std::make_shared<data_batch>(1, std::move(data));
 
-  // Add batches with different sizes
-  for (size_t i = 0; i < sizes.size(); ++i) {
-    auto data   = std::make_unique<mock_data_representation>(memory::Tier::GPU, sizes[i]);
-    auto* batch = new data_batch(i, manager, std::move(data));
-    batch->increment_view_ref_count();  // Prevent auto-delete
-    batches.push_back(batch);
+  // Lock for downgrade before adding to repository
+  REQUIRE(batch->try_to_lock_for_downgrade() == true);
+  REQUIRE(batch->get_state() == batch_state::downgrading);
 
-    auto view = std::make_unique<data_batch_view>(batch);
-    repository.add_new_data_batch_view(std::move(view));
-  }
+  // Add to repository while downgrading
+  repository.add_data_batch(batch);
 
-  // Pull all batches
-  int count = 0;
-  while (auto view = repository.pull_data_batch_view()) {
-    ++count;
-  }
-
-  REQUIRE(count == sizes.size());
-
-  // Clean up
-  for (auto* batch : batches) {
-    batch->decrement_view_ref_count();
-  }
-}
-
-// Test interleaved add and pull
-TEST_CASE("idata_repository Interleaved Add and Pull", "[data_repository]")
-{
-  data_repository_manager manager;
-  idata_repository repository;
-
-  std::vector<data_batch*> batches;
-
-  for (int cycle = 0; cycle < 50; ++cycle) {
-    // Add some batches
-    for (int i = 0; i < 3; ++i) {
-      auto data   = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
-      auto* batch = new data_batch(cycle * 3 + i, manager, std::move(data));
-      batch->increment_view_ref_count();  // Prevent auto-delete
-      batches.push_back(batch);
-
-      auto view = std::make_unique<data_batch_view>(batch);
-      repository.add_new_data_batch_view(std::move(view));
-    }
-
-    // Pull one batch
-    auto view = repository.pull_data_batch_view();
-    REQUIRE(view != nullptr);
-  }
-
-  // Pull remaining batches
-  int remaining = 0;
-  while (auto view = repository.pull_data_batch_view()) {
-    ++remaining;
-  }
-
-  // Should have 50 cycles * 3 adds - 50 pulls = 100 remaining
-  REQUIRE(remaining == 100);
-
-  // Clean up
-  for (auto* batch : batches) {
-    batch->decrement_view_ref_count();
-  }
+  // Pull should fail because batch is downgrading
+  auto [pulled, handle] = repository.pull_data_batch();
+  REQUIRE(pulled == nullptr);
 }

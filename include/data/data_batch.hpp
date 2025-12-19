@@ -36,25 +36,104 @@ class memory_space;
 
 namespace cucascade {
 
-class data_batch_view;          // Forward declarationc
-class data_repository_manager;  // Forward declaration
+/**
+ * @brief Represents the current state of a data_batch.
+ */
+enum class batch_state {
+  at_rest,     ///< Batch is idle, not being processed or downgraded
+  processing,  ///< Batch is currently being processed
+  downgrading  ///< Batch is currently being downgraded to a lower memory tier
+};
+
+// Forward declaration
+class data_batch;
+
+/**
+ * @brief RAII handle that manages processing state for a data_batch.
+ *
+ * When this handle goes out of scope, it decrements the processing count of the
+ * associated data_batch. If the processing count drops to zero, the batch state
+ * transitions from processing back to at_rest.
+ *
+ * @note This class is move-only to ensure proper ownership semantics.
+ */
+class data_batch_processing_handle {
+ public:
+  /**
+   * @brief Default constructor creates an empty handle.
+   */
+  data_batch_processing_handle() : _batch(nullptr) {}
+
+  /**
+   * @brief Construct a handle for the given data_batch.
+   *
+   * @param batch Pointer to the data_batch to manage (non-owning)
+   */
+  explicit data_batch_processing_handle(data_batch* batch) : _batch(batch) {}
+
+  /**
+   * @brief Destructor decrements processing count and potentially transitions state.
+   */
+  ~data_batch_processing_handle();
+
+  // Move-only semantics
+  data_batch_processing_handle(const data_batch_processing_handle&)            = delete;
+  data_batch_processing_handle& operator=(const data_batch_processing_handle&) = delete;
+
+  /**
+   * @brief Move constructor - transfers ownership of the handle.
+   */
+  data_batch_processing_handle(data_batch_processing_handle&& other) noexcept : _batch(other._batch)
+  {
+    other._batch = nullptr;
+  }
+
+  /**
+   * @brief Move assignment operator - transfers ownership of the handle.
+   */
+  data_batch_processing_handle& operator=(data_batch_processing_handle&& other) noexcept
+  {
+    if (this != &other) {
+      // Release current batch if any
+      release();
+      _batch       = other._batch;
+      other._batch = nullptr;
+    }
+    return *this;
+  }
+
+  /**
+   * @brief Check if this handle is valid (managing a batch).
+   */
+  bool valid() const { return _batch != nullptr; }
+
+  /**
+   * @brief Explicitly release the handle, decrementing the processing count.
+   */
+  void release();
+
+ private:
+  data_batch* _batch;  ///< Non-owning pointer to the managed data_batch
+};
 
 /**
  * @brief A data batch represents a collection of data that can be moved between different memory
  * tiers.
  *
  * data_batch is the core unit of data management in the Sirius system. It wraps an
- * idata_representation and provides reference counting functionality to track how many views are
- * currently accessing the data. This enables safe memory management and efficient data movement
+ * idata_representation and provides processing counting functionality to track when data is being
+ * actively used. This enables safe memory management and efficient data movement
  * between GPU memory, host memory, and storage tiers.
  *
  * Key characteristics:
  * - Move-only semantics (no copy constructor/assignment)
- * - Reference counting for safe shared access via data_batch_view
+ * - Processing counting for safe shared access and eviction prevention
+ * - State management (at_rest, processing, downgrading) for lifecycle tracking
  * - Delegated tier management to underlying idata_representation
  * - Unique batch ID for tracking and debugging purposes
+ * - Lifecycle managed by smart pointers (std::shared_ptr or std::unique_ptr)
  *
- * @note This class is not thread-safe for construction/destruction, but the reference counting
+ * @note This class is not thread-safe for construction/destruction, but the state management
  *       operations are protected by an internal mutex and thread-safe.
  */
 class data_batch {
@@ -62,16 +141,10 @@ class data_batch {
   /**
    * @brief Construct a new data_batch with the given ID and data representation.
    *
-   * @param batch_id Unique identifier for this batch (obtained from data_repository_manager)
+   * @param batch_id Unique identifier for this batch
    * @param data Ownership of the data representation is transferred to this batch
    */
-  data_batch(uint64_t batch_id,
-             data_repository_manager& data_repo_mgr,
-             std::unique_ptr<idata_representation> data);
-  data_batch(uint64_t batch_id,
-             data_repository_manager& data_repo_mgr,
-             std::unique_ptr<idata_representation> data,
-             cucascade::memory::memory_space& memory_space);
+  data_batch(uint64_t batch_id, std::unique_ptr<idata_representation> data);
 
   /**
    * @brief Move constructor - transfers ownership of the batch and its data.
@@ -80,8 +153,7 @@ class data_batch {
    * batch_id to 0 and data pointer to nullptr.
    *
    * @param other The batch to move from (will have batch_id set to 0 and data set to nullptr)
-   * @throws std::runtime_error if the source batch has active views (view_count != 0)
-   * @throws std::runtime_error if the source batch has active pins (pin_count != 0)
+   * @throws std::runtime_error if the source batch has active processing (processing_count != 0)
    */
   data_batch(data_batch&& other);
 
@@ -93,8 +165,7 @@ class data_batch {
    *
    * @param other The batch to move from (will have batch_id set to 0 and data set to nullptr)
    * @return data_batch& Reference to this batch
-   * @throws std::runtime_error if the source batch has active views (view_count != 0)
-   * @throws std::runtime_error if the source batch has active pins (pin_count != 0)
+   * @throws std::runtime_error if the source batch has active processing (processing_count != 0)
    */
   data_batch& operator=(data_batch&& other);
 
@@ -113,62 +184,18 @@ class data_batch {
   uint64_t get_batch_id() const;
 
   /**
-   * @brief Decrement the view reference count (mutex-protected).
+   * @brief Get the current state of this batch.
    *
-   * Called when a data_batch_view is destroyed. Returns the count before decrement.
+   * @return batch_state The current state (at_rest, processing, or downgrading)
    */
-  size_t decrement_view_ref_count();
+  batch_state get_state() const;
 
   /**
-   * @brief Increment the view reference count (mutex-protected).
-   */
-  void increment_view_ref_count();
-
-  /**
-   * @brief Thread-safe method to increment pin count with tier validation.
+   * @brief Get the current processing count (mutex-protected).
    *
-   * Called when a batch is pinned in memory to prevent eviction. This method
-   * validates that the data is in GPU tier before incrementing the pin count.
-   * Uses a mutex lock for thread-safe tier checking and atomic operations.
-   * Pin count == 0 means that the data_batch can be downgraded from GPU memory.
-   *
-   * @throws std::runtime_error if data is not currently in GPU tier
+   * @return size_t The number of active processing handles
    */
-  void increment_pin_ref_count();
-
-  /**
-   * @brief Thread-safe method to decrement pin count with tier validation.
-   *
-   * Called when a pin is released. This method validates that the data is in GPU tier
-   * before decrementing the pin count. When the pin count reaches zero, the batch can be
-   * considered for eviction or tier movement according to memory management policies.
-   * Uses a mutex lock for thread-safe tier checking and atomic operations.
-   *
-   * @throws std::runtime_error if data is not currently in GPU tier
-   */
-  void decrement_pin_ref_count();
-
-  /**
-   * @brief Create a data_batch_view referencing this data_batch.
-   *
-   * Casts the underlying data representation to gpu_table_representation and creates
-   * a data_batch_view from its CUDF table view. The data_batch_view constructor will
-   * handle incrementing the reference count.
-   *
-   * @return std::unique_ptr<data_batch_view> A unique pointer to the new data_batch_view
-   * @note Assumes data is already in GPU tier as gpu_table_representation
-   */
-  std::unique_ptr<data_batch_view> create_view();
-
-  /**
-   * @brief Get the current view reference count (mutex-protected).
-   */
-  size_t get_view_count() const;
-
-  /**
-   * @brief Get the current pin count (mutex-protected).
-   */
-  size_t get_pin_count() const;
+  size_t get_processing_count() const;
 
   /**
    * @brief Get the underlying data representation.
@@ -181,52 +208,62 @@ class data_batch {
   idata_representation* get_data() const;
 
   /**
-   * @brief Get the data batch holder.
-   *
-   * Returns a pointer to the data batch holder.
-   *
-   * @return data_repository_manager* Pointer to the data repository manager
-   */
-  data_repository_manager* get_data_repository_manager() const;
-
-  /**
    * @brief Get the memory_space where this batch currently resides.
+   *
+   * Delegates to the underlying idata_representation to determine the memory space.
+   *
+   * @return cucascade::memory::memory_space* Pointer to the memory space
    */
   cucascade::memory::memory_space* get_memory_space() const;
 
   /**
    * @brief Replace the underlying data representation.
-   *        Requires no active views or pins.
+   *        Requires no active processing.
    */
   void set_data(std::unique_ptr<idata_representation> data);
 
   /**
    * @brief Convert the underlying representation to the target memory_space.
-   *        Requires no active views or pins.
+   *        Requires no active processing.
    */
   void convert_to_memory_space(const cucascade::memory::memory_space* target_memory_space,
                                rmm::cuda_stream_view stream);
 
-  bool try_to_lock_for_downgrade()
-  {
-    std::lock_guard<std::mutex> lock(_mutex);
-    if (_pin_count == 0 && !_downgrade_locked) {
-      _downgrade_locked = true;
-      return true;
-    }
-    return false;
-  }
+  /**
+   * @brief Attempt to lock this batch for processing operations.
+   *
+   * Returns true if the batch is either at_rest or already processing.
+   * If successful, increments the processing count and transitions to processing state.
+   *
+   * @return true if the batch was successfully locked for processing
+   * @return false if the batch is currently being downgraded
+   */
+  bool try_to_lock_for_processing();
+
+  /**
+   * @brief Attempt to lock this batch for downgrade operations.
+   *
+   * @return true if the batch was successfully locked (processing_count == 0 and state is at_rest)
+   * @return false if the batch could not be locked
+   */
+  bool try_to_lock_for_downgrade();
 
  private:
-  mutable std::mutex
-    _mutex;            ///< Mutex for thread-safe access to tier checking and reference counting
-  uint64_t _batch_id;  ///< Unique identifier for this data batch
-  std::unique_ptr<idata_representation> _data;  ///< Pointer to the actual data representation
-  size_t _view_count = 0;                       ///< Reference count for tracking views
-  size_t _pin_count  = 0;  ///< Reference count for tracking pins to prevent eviction
-  data_repository_manager* _data_repo_mgr;         ///< Pointer to the data repository manager
-  cucascade::memory::memory_space* _memory_space;  ///< Memory space where the data resides
-  bool _downgrade_locked = false;                  ///< Whether the batch is locked for downgrade
+  friend class data_batch_processing_handle;
+
+  /**
+   * @brief Decrement processing count and potentially transition state.
+   *
+   * Called by data_batch_processing_handle when it goes out of scope.
+   * If processing count drops to zero, transitions from processing to at_rest.
+   */
+  void decrement_processing_count();
+
+  mutable std::mutex _mutex;  ///< Mutex for thread-safe access to state and processing count
+  uint64_t _batch_id;         ///< Unique identifier for this data batch
+  std::unique_ptr<idata_representation> _data;      ///< Pointer to the actual data representation
+  size_t _processing_count = 0;                     ///< Count of active processing handles
+  batch_state _state       = batch_state::at_rest;  ///< Current state of the batch
 };
 
 }  // namespace cucascade

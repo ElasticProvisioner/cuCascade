@@ -17,23 +17,10 @@
 
 #include "data/data_repository.hpp"
 
-#include "data/data_batch_view.hpp"
-
 namespace cucascade {
 
-void idata_repository::add_new_data_batch_view(std::unique_ptr<data_batch_view> batch_view)
-{
-  std::lock_guard<std::mutex> lock(_mutex);
-  _data_batches.push_back(std::move(batch_view));
-}
-
-std::unique_ptr<data_batch_view> idata_repository::pull_data_batch_view()
-{
-  std::lock_guard<std::mutex> lock(_mutex);
-  if (_data_batches.empty()) { return nullptr; }
-  auto batch = std::move(_data_batches.front());
-  _data_batches.erase(_data_batches.begin());
-  return batch;
-}
+// Explicit template instantiations for smart pointer types
+template class idata_repository<std::shared_ptr<data_batch>>;
+template class idata_repository<std::unique_ptr<data_batch>>;
 
 }  // namespace cucascade

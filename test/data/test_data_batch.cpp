@@ -17,8 +17,6 @@
 
 #include "data/common.hpp"
 #include "data/data_batch.hpp"
-#include "data/data_batch_view.hpp"
-#include "data/data_repository_manager.hpp"
 #include "memory/null_device_memory_resource.hpp"
 
 #include <catch2/catch.hpp>
@@ -87,23 +85,20 @@ class mock_data_representation : private mock_memory_space_holder, public idata_
 // Test basic construction
 TEST_CASE("data_batch Construction", "[data_batch]")
 {
-  data_repository_manager manager;
   auto data = std::make_unique<mock_data_representation>(memory::Tier::GPU, 2048);
-  data_batch batch(1, manager, std::move(data));
+  data_batch batch(1, std::move(data));
 
   REQUIRE(batch.get_batch_id() == 1);
   REQUIRE(batch.get_current_tier() == memory::Tier::GPU);
-  REQUIRE(batch.get_view_count() == 0);
-  REQUIRE(batch.get_pin_count() == 0);
-  REQUIRE(batch.get_data_repository_manager() == &manager);
+  REQUIRE(batch.get_processing_count() == 0);
+  REQUIRE(batch.get_state() == batch_state::at_rest);
 }
 
 // Test move constructor
 TEST_CASE("data_batch Move Constructor", "[data_batch]")
 {
-  data_repository_manager manager;
   auto data = std::make_unique<mock_data_representation>(memory::Tier::HOST, 1024);
-  data_batch batch1(42, manager, std::move(data));
+  data_batch batch1(42, std::move(data));
 
   REQUIRE(batch1.get_batch_id() == 42);
   REQUIRE(batch1.get_current_tier() == memory::Tier::HOST);
@@ -119,12 +114,11 @@ TEST_CASE("data_batch Move Constructor", "[data_batch]")
 // Test move assignment
 TEST_CASE("data_batch Move Assignment", "[data_batch]")
 {
-  data_repository_manager manager;
   auto data1 = std::make_unique<mock_data_representation>(memory::Tier::GPU, 512);
   auto data2 = std::make_unique<mock_data_representation>(memory::Tier::HOST, 1024);
 
-  data_batch batch1(10, manager, std::move(data1));
-  data_batch batch2(20, manager, std::move(data2));
+  data_batch batch1(10, std::move(data1));
+  data_batch batch2(20, std::move(data2));
 
   REQUIRE(batch1.get_batch_id() == 10);
   REQUIRE(batch2.get_batch_id() == 20);
@@ -140,9 +134,8 @@ TEST_CASE("data_batch Move Assignment", "[data_batch]")
 // Test self-assignment (move)
 TEST_CASE("data_batch Self Move Assignment", "[data_batch]")
 {
-  data_repository_manager manager;
   auto data = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
-  data_batch batch(100, manager, std::move(data));
+  data_batch batch(100, std::move(data));
 
   // Self-assignment should not crash
   batch = std::move(batch);
@@ -151,176 +144,157 @@ TEST_CASE("data_batch Self Move Assignment", "[data_batch]")
   REQUIRE(batch.get_current_tier() == memory::Tier::GPU);
 }
 
-// Test view reference counting - increment and decrement
-TEST_CASE("data_batch View Reference Counting", "[data_batch]")
+// Test processing state management with try_to_lock_for_processing
+TEST_CASE("data_batch Processing State Management", "[data_batch]")
 {
-  data_repository_manager manager;
   auto data = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
-  data_batch batch(1, manager, std::move(data));
+  data_batch batch(1, std::move(data));
 
-  REQUIRE(batch.get_view_count() == 0);
+  REQUIRE(batch.get_processing_count() == 0);
+  REQUIRE(batch.get_state() == batch_state::at_rest);
 
-  // Increment view count
-  batch.increment_view_ref_count();
-  REQUIRE(batch.get_view_count() == 1);
+  // Lock for processing
+  REQUIRE(batch.try_to_lock_for_processing() == true);
+  REQUIRE(batch.get_processing_count() == 1);
+  REQUIRE(batch.get_state() == batch_state::processing);
 
-  batch.increment_view_ref_count();
-  REQUIRE(batch.get_view_count() == 2);
+  // Lock again while already processing
+  REQUIRE(batch.try_to_lock_for_processing() == true);
+  REQUIRE(batch.get_processing_count() == 2);
+  REQUIRE(batch.get_state() == batch_state::processing);
 
-  batch.increment_view_ref_count();
-  REQUIRE(batch.get_view_count() == 3);
-
-  // Decrement view count
-  size_t old_count = batch.decrement_view_ref_count();
-  REQUIRE(old_count == 3);
-  REQUIRE(batch.get_view_count() == 2);
-
-  old_count = batch.decrement_view_ref_count();
-  REQUIRE(old_count == 2);
-  REQUIRE(batch.get_view_count() == 1);
-
-  old_count = batch.decrement_view_ref_count();
-  REQUIRE(old_count == 1);
-  REQUIRE(batch.get_view_count() == 0);
-  // Note: batch is not automatically deleted - deletion happens via data_batch_view destructor
+  REQUIRE(batch.try_to_lock_for_processing() == true);
+  REQUIRE(batch.get_processing_count() == 3);
 }
 
-// Test pin reference counting - increment and decrement
-TEST_CASE("data_batch Pin Reference Counting", "[data_batch]")
+// Test data_batch_processing_handle RAII behavior
+TEST_CASE("data_batch_processing_handle RAII", "[data_batch]")
 {
-  data_repository_manager manager;
   auto data = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
-  data_batch batch(1, manager, std::move(data));
+  data_batch batch(1, std::move(data));
 
-  REQUIRE(batch.get_pin_count() == 0);
+  REQUIRE(batch.get_processing_count() == 0);
+  REQUIRE(batch.get_state() == batch_state::at_rest);
 
-  // Increment pin count
-  batch.increment_pin_ref_count();
-  REQUIRE(batch.get_pin_count() == 1);
+  {
+    // Create a processing handle
+    REQUIRE(batch.try_to_lock_for_processing() == true);
+    data_batch_processing_handle handle(&batch);
 
-  batch.increment_pin_ref_count();
-  REQUIRE(batch.get_pin_count() == 2);
+    REQUIRE(batch.get_processing_count() == 1);
+    REQUIRE(batch.get_state() == batch_state::processing);
 
-  batch.increment_pin_ref_count();
-  REQUIRE(batch.get_pin_count() == 3);
+    {
+      // Create another handle
+      REQUIRE(batch.try_to_lock_for_processing() == true);
+      data_batch_processing_handle handle2(&batch);
 
-  // Decrement pin count
-  batch.decrement_pin_ref_count();
-  REQUIRE(batch.get_pin_count() == 2);
+      REQUIRE(batch.get_processing_count() == 2);
+    }  // handle2 goes out of scope
 
-  batch.decrement_pin_ref_count();
-  REQUIRE(batch.get_pin_count() == 1);
+    REQUIRE(batch.get_processing_count() == 1);
+    REQUIRE(batch.get_state() == batch_state::processing);
+  }  // handle goes out of scope
 
-  batch.decrement_pin_ref_count();
-  REQUIRE(batch.get_pin_count() == 0);
+  REQUIRE(batch.get_processing_count() == 0);
+  REQUIRE(batch.get_state() == batch_state::at_rest);
 }
 
-// Test increment pin count throws when not in GPU memory::Tier
-TEST_CASE("data_batch increment_pin_ref_count GPU memory::Tier Validation", "[data_batch]")
+// Test try_to_lock_for_downgrade blocks processing
+TEST_CASE("data_batch Downgrade Blocks Processing", "[data_batch]")
 {
-  data_repository_manager manager;
-  auto data = std::make_unique<mock_data_representation>(memory::Tier::HOST, 1024);
-  data_batch batch(1, manager, std::move(data));
-
-  // Should throw because data is not in GPU memory::Tier
-  REQUIRE_THROWS_AS(batch.increment_pin_ref_count(), std::runtime_error);
-  REQUIRE(batch.get_pin_count() == 0);  // Count should not change
-}
-
-// Test decrement pin count throws when not in GPU memory::Tier
-TEST_CASE("data_batch decrement_pin_ref_count GPU memory::Tier Validation", "[data_batch]")
-{
-  data_repository_manager manager;
   auto data = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
-  data_batch batch(1, manager, std::move(data));
+  data_batch batch(1, std::move(data));
 
-  // First increment while in GPU memory::Tier
-  batch.increment_pin_ref_count();
-  REQUIRE(batch.get_pin_count() == 1);
+  REQUIRE(batch.get_state() == batch_state::at_rest);
 
-  // Decrement while in GPU memory::Tier should work
-  batch.decrement_pin_ref_count();
-  REQUIRE(batch.get_pin_count() == 0);
+  // Lock for downgrade
+  REQUIRE(batch.try_to_lock_for_downgrade() == true);
+  REQUIRE(batch.get_state() == batch_state::downgrading);
+
+  // Try to lock for processing should fail while downgrading
+  REQUIRE(batch.try_to_lock_for_processing() == false);
+  REQUIRE(batch.get_processing_count() == 0);
 }
 
-// Test that view count operations work regardless of memory::Tier
-TEST_CASE("data_batch View Count No memory::Tier Validation", "[data_batch]")
+// Test try_to_lock_for_downgrade fails when processing
+TEST_CASE("data_batch Cannot Downgrade While Processing", "[data_batch]")
 {
-  data_repository_manager manager;
-  auto data = std::make_unique<mock_data_representation>(memory::Tier::HOST, 1024);
-  data_batch batch(1, manager, std::move(data));
+  auto data = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
+  data_batch batch(1, std::move(data));
 
-  // View count should work even when not in GPU memory::Tier
-  batch.increment_view_ref_count();
-  REQUIRE(batch.get_view_count() == 1);
+  // Start processing
+  REQUIRE(batch.try_to_lock_for_processing() == true);
+  data_batch_processing_handle handle(&batch);
 
-  batch.decrement_view_ref_count();
-  REQUIRE(batch.get_view_count() == 0);
+  REQUIRE(batch.get_state() == batch_state::processing);
+
+  // Try to lock for downgrade should fail
+  REQUIRE(batch.try_to_lock_for_downgrade() == false);
+  REQUIRE(batch.get_state() == batch_state::processing);
 }
 
 // Test multiple batches with different IDs
 TEST_CASE("Multiple data_batch Instances", "[data_batch]")
 {
-  data_repository_manager manager;
   std::vector<data_batch> batches;
 
   for (uint64_t i = 0; i < 10; ++i) {
     auto data = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024 * (i + 1));
-    batches.emplace_back(i, manager, std::move(data));
+    batches.emplace_back(i, std::move(data));
   }
 
   // Verify all batches have correct IDs and tiers
   for (uint64_t i = 0; i < 10; ++i) {
     REQUIRE(batches[i].get_batch_id() == i);
     REQUIRE(batches[i].get_current_tier() == memory::Tier::GPU);
-    REQUIRE(batches[i].get_view_count() == 0);
-    REQUIRE(batches[i].get_pin_count() == 0);
+    REQUIRE(batches[i].get_processing_count() == 0);
+    REQUIRE(batches[i].get_state() == batch_state::at_rest);
   }
 }
 
 // Test get_current_tier delegates to idata_representation
 TEST_CASE("data_batch get_current_tier Delegation", "[data_batch]")
 {
-  data_repository_manager manager;
   // Test GPU memory::Tier
   {
     auto data = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
-    data_batch batch(1, manager, std::move(data));
+    data_batch batch(1, std::move(data));
     REQUIRE(batch.get_current_tier() == memory::Tier::GPU);
   }
 
   // Test HOST memory::Tier
   {
     auto data = std::make_unique<mock_data_representation>(memory::Tier::HOST, 1024);
-    data_batch batch(2, manager, std::move(data));
+    data_batch batch(2, std::move(data));
     REQUIRE(batch.get_current_tier() == memory::Tier::HOST);
   }
 
   // Test DISK memory::Tier
   {
     auto data = std::make_unique<mock_data_representation>(memory::Tier::DISK, 1024);
-    data_batch batch(3, manager, std::move(data));
+    data_batch batch(3, std::move(data));
     REQUIRE(batch.get_current_tier() == memory::Tier::DISK);
   }
 }
 
-// Test thread-safe view reference counting
-TEST_CASE("data_batch Thread-Safe View Reference Counting", "[data_batch]")
+// Test thread-safe processing count
+TEST_CASE("data_batch Thread-Safe Processing Count", "[data_batch]")
 {
-  data_repository_manager manager;
   auto data = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
-  data_batch batch(1, manager, std::move(data));
+  data_batch batch(1, std::move(data));
 
-  constexpr int num_threads           = 10;
-  constexpr int increments_per_thread = 100;
+  constexpr int num_threads      = 10;
+  constexpr int locks_per_thread = 100;
 
   std::vector<std::thread> threads;
+  std::vector<std::vector<data_batch_processing_handle>> thread_handles(num_threads);
 
-  // Launch threads to increment view count
+  // Launch threads to lock for processing
   for (int i = 0; i < num_threads; ++i) {
-    threads.emplace_back([&batch]() {
-      for (int j = 0; j < increments_per_thread; ++j) {
-        batch.increment_view_ref_count();
+    threads.emplace_back([&batch, &thread_handles, i]() {
+      for (int j = 0; j < locks_per_thread; ++j) {
+        if (batch.try_to_lock_for_processing()) { thread_handles[i].emplace_back(&batch); }
       }
     });
   }
@@ -331,184 +305,28 @@ TEST_CASE("data_batch Thread-Safe View Reference Counting", "[data_batch]")
   }
 
   // Verify final count
-  REQUIRE(batch.get_view_count() == num_threads * increments_per_thread);
+  REQUIRE(batch.get_processing_count() == num_threads * locks_per_thread);
 
-  threads.clear();
-
-  // Launch threads to decrement view count
-  for (int i = 0; i < num_threads; ++i) {
-    threads.emplace_back([&batch]() {
-      for (int j = 0; j < increments_per_thread; ++j) {
-        batch.decrement_view_ref_count();
-      }
-    });
-  }
-
-  // Wait for all threads to complete
-  for (auto& thread : threads) {
-    thread.join();
+  // Clear all handles to release processing locks
+  for (auto& handles : thread_handles) {
+    handles.clear();
   }
 
   // Verify final count is back to zero
-  REQUIRE(batch.get_view_count() == 0);
-}
-
-// Test thread-safe pin reference counting
-TEST_CASE("data_batch Thread-Safe Pin Reference Counting", "[data_batch]")
-{
-  data_repository_manager manager;
-  auto data = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
-  data_batch batch(1, manager, std::move(data));
-
-  constexpr int num_threads           = 10;
-  constexpr int increments_per_thread = 100;
-
-  std::vector<std::thread> threads;
-
-  // Launch threads to increment pin count
-  for (int i = 0; i < num_threads; ++i) {
-    threads.emplace_back([&batch]() {
-      for (int j = 0; j < increments_per_thread; ++j) {
-        batch.increment_pin_ref_count();
-      }
-    });
-  }
-
-  // Wait for all threads to complete
-  for (auto& thread : threads) {
-    thread.join();
-  }
-
-  // Verify final count
-  REQUIRE(batch.get_pin_count() == num_threads * increments_per_thread);
-
-  threads.clear();
-
-  // Launch threads to decrement pin count
-  for (int i = 0; i < num_threads; ++i) {
-    threads.emplace_back([&batch]() {
-      for (int j = 0; j < increments_per_thread; ++j) {
-        batch.decrement_pin_ref_count();
-      }
-    });
-  }
-
-  // Wait for all threads to complete
-  for (auto& thread : threads) {
-    thread.join();
-  }
-
-  // Verify final count is back to zero
-  REQUIRE(batch.get_pin_count() == 0);
-}
-
-// Test concurrent view increment and decrement
-TEST_CASE("data_batch Concurrent View Increment and Decrement", "[data_batch]")
-{
-  data_repository_manager manager;
-  auto data = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
-  data_batch batch(1, manager, std::move(data));
-
-  // Pre-increment to avoid hitting zero during concurrent operations
-  for (int i = 0; i < 1000; ++i) {
-    batch.increment_view_ref_count();
-  }
-
-  constexpr int num_threads           = 5;
-  constexpr int operations_per_thread = 100;
-
-  std::vector<std::thread> inc_threads;
-  std::vector<std::thread> dec_threads;
-
-  // Launch incrementing threads
-  for (int i = 0; i < num_threads; ++i) {
-    inc_threads.emplace_back([&batch]() {
-      for (int j = 0; j < operations_per_thread; ++j) {
-        batch.increment_view_ref_count();
-      }
-    });
-  }
-
-  // Launch decrementing threads
-  for (int i = 0; i < num_threads; ++i) {
-    dec_threads.emplace_back([&batch]() {
-      for (int j = 0; j < operations_per_thread; ++j) {
-        batch.decrement_view_ref_count();
-      }
-    });
-  }
-
-  // Wait for all threads
-  for (auto& thread : inc_threads) {
-    thread.join();
-  }
-  for (auto& thread : dec_threads) {
-    thread.join();
-  }
-
-  // Net effect should be 1000 (initial) + 0 (equal increments and decrements)
-  REQUIRE(batch.get_view_count() == 1000);
-}
-
-// Test concurrent pin increment and decrement
-TEST_CASE("data_batch Concurrent Pin Increment and Decrement", "[data_batch]")
-{
-  data_repository_manager manager;
-  auto data = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
-  data_batch batch(1, manager, std::move(data));
-
-  // Pre-increment to avoid hitting zero during concurrent operations
-  for (int i = 0; i < 1000; ++i) {
-    batch.increment_pin_ref_count();
-  }
-
-  constexpr int num_threads           = 5;
-  constexpr int operations_per_thread = 100;
-
-  std::vector<std::thread> inc_threads;
-  std::vector<std::thread> dec_threads;
-
-  // Launch incrementing threads
-  for (int i = 0; i < num_threads; ++i) {
-    inc_threads.emplace_back([&batch]() {
-      for (int j = 0; j < operations_per_thread; ++j) {
-        batch.increment_pin_ref_count();
-      }
-    });
-  }
-
-  // Launch decrementing threads
-  for (int i = 0; i < num_threads; ++i) {
-    dec_threads.emplace_back([&batch]() {
-      for (int j = 0; j < operations_per_thread; ++j) {
-        batch.decrement_pin_ref_count();
-      }
-    });
-  }
-
-  // Wait for all threads
-  for (auto& thread : inc_threads) {
-    thread.join();
-  }
-  for (auto& thread : dec_threads) {
-    thread.join();
-  }
-
-  // Net effect should be 1000 (initial) + 0 (equal increments and decrements)
-  REQUIRE(batch.get_pin_count() == 1000);
+  REQUIRE(batch.get_processing_count() == 0);
+  REQUIRE(batch.get_state() == batch_state::at_rest);
 }
 
 // Test batch ID uniqueness in practice
 TEST_CASE("data_batch Unique IDs", "[data_batch]")
 {
-  data_repository_manager manager;
   std::vector<uint64_t> batch_ids = {0, 1, 100, 999, 1000, 9999, UINT64_MAX - 1, UINT64_MAX};
 
   std::vector<data_batch> batches;
 
   for (auto id : batch_ids) {
     auto data = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
-    batches.emplace_back(id, manager, std::move(data));
+    batches.emplace_back(id, std::move(data));
   }
 
   // Verify each batch has the correct ID
@@ -517,62 +335,42 @@ TEST_CASE("data_batch Unique IDs", "[data_batch]")
   }
 }
 
-// Test edge case: zero view count operations
-TEST_CASE("data_batch Zero View Count", "[data_batch]")
+// Test edge case: zero processing count operations
+TEST_CASE("data_batch Zero Processing Count", "[data_batch]")
 {
-  data_repository_manager manager;
   auto data = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
-  data_batch batch(1, manager, std::move(data));
+  data_batch batch(1, std::move(data));
 
-  // Starting view count should be zero
-  REQUIRE(batch.get_view_count() == 0);
+  // Starting processing count should be zero
+  REQUIRE(batch.get_processing_count() == 0);
+  REQUIRE(batch.get_state() == batch_state::at_rest);
 
-  // Increment from zero
-  batch.increment_view_ref_count();
-  REQUIRE(batch.get_view_count() == 1);
+  // Lock for processing from at_rest
+  REQUIRE(batch.try_to_lock_for_processing() == true);
+  {
+    data_batch_processing_handle handle(&batch);
+    REQUIRE(batch.get_processing_count() == 1);
+    REQUIRE(batch.get_state() == batch_state::processing);
+  }  // Handle goes out of scope
 
-  // Decrement back to zero
-  batch.decrement_view_ref_count();
-  REQUIRE(batch.get_view_count() == 0);
+  // Should be back to at_rest
+  REQUIRE(batch.get_processing_count() == 0);
+  REQUIRE(batch.get_state() == batch_state::at_rest);
 
-  // Can increment again from zero
-  batch.increment_view_ref_count();
-  REQUIRE(batch.get_view_count() == 1);
-}
-
-// Test edge case: zero pin count operations
-TEST_CASE("data_batch Zero Pin Count", "[data_batch]")
-{
-  data_repository_manager manager;
-  auto data = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
-  data_batch batch(1, manager, std::move(data));
-
-  // Starting pin count should be zero
-  REQUIRE(batch.get_pin_count() == 0);
-
-  // Increment from zero
-  batch.increment_pin_ref_count();
-  REQUIRE(batch.get_pin_count() == 1);
-
-  // Decrement back to zero
-  batch.decrement_pin_ref_count();
-  REQUIRE(batch.get_pin_count() == 0);
-
-  // Can increment again from zero
-  batch.increment_pin_ref_count();
-  REQUIRE(batch.get_pin_count() == 1);
+  // Can lock again from at_rest
+  REQUIRE(batch.try_to_lock_for_processing() == true);
+  REQUIRE(batch.get_processing_count() == 1);
 }
 
 // Test with different data sizes
 TEST_CASE("data_batch With Different Data Sizes", "[data_batch]")
 {
-  data_repository_manager manager;
   std::vector<size_t> sizes = {0, 1, 1024, 1024 * 1024, 1024 * 1024 * 100};
 
   for (size_t size : sizes) {
     auto data      = std::make_unique<mock_data_representation>(memory::Tier::GPU, size);
     auto* data_ptr = data.get();
-    data_batch batch(1, manager, std::move(data));
+    data_batch batch(1, std::move(data));
 
     // Verify the data representation is accessible through the batch
     REQUIRE(batch.get_current_tier() == memory::Tier::GPU);
@@ -580,34 +378,15 @@ TEST_CASE("data_batch With Different Data Sizes", "[data_batch]")
   }
 }
 
-// Test that move operations require zero reference counts
-TEST_CASE("data_batch Move Requires Zero Reference Counts", "[data_batch]")
+// Test that move operations require zero processing count
+TEST_CASE("data_batch Move Requires Zero Processing Count", "[data_batch]")
 {
-  data_repository_manager manager;
-  // Test that moving with active views throws
+  // Test that moving with active processing throws
   {
     auto data = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
-    data_batch batch1(1, manager, std::move(data));
-    batch1.increment_view_ref_count();
-
-    REQUIRE_THROWS_AS([&]() { data_batch batch2(std::move(batch1)); }(), std::runtime_error);
-  }
-
-  // Test that moving with active pins throws
-  {
-    auto data = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
-    data_batch batch1(1, manager, std::move(data));
-    batch1.increment_pin_ref_count();
-
-    REQUIRE_THROWS_AS([&]() { data_batch batch2(std::move(batch1)); }(), std::runtime_error);
-  }
-
-  // Test that moving with both active views and pins throws
-  {
-    auto data = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
-    data_batch batch1(1, manager, std::move(data));
-    batch1.increment_view_ref_count();
-    batch1.increment_pin_ref_count();
+    data_batch batch1(1, std::move(data));
+    batch1.try_to_lock_for_processing();
+    data_batch_processing_handle handle(&batch1);
 
     REQUIRE_THROWS_AS([&]() { data_batch batch2(std::move(batch1)); }(), std::runtime_error);
   }
@@ -615,183 +394,140 @@ TEST_CASE("data_batch Move Requires Zero Reference Counts", "[data_batch]")
   // Test that moving with zero counts succeeds
   {
     auto data = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
-    data_batch batch1(1, manager, std::move(data));
+    data_batch batch1(1, std::move(data));
 
-    REQUIRE(batch1.get_view_count() == 0);
-    REQUIRE(batch1.get_pin_count() == 0);
+    REQUIRE(batch1.get_processing_count() == 0);
 
     data_batch batch2(std::move(batch1));
 
-    REQUIRE(batch2.get_view_count() == 0);
-    REQUIRE(batch2.get_pin_count() == 0);
+    REQUIRE(batch2.get_processing_count() == 0);
     REQUIRE(batch2.get_batch_id() == 1);
   }
 }
 
-// Test multiple rapid view count increment/decrement cycles
-TEST_CASE("data_batch Rapid View Count Cycles", "[data_batch]")
+// Test multiple rapid processing lock/unlock cycles
+TEST_CASE("data_batch Rapid Processing Cycles", "[data_batch]")
 {
-  data_repository_manager manager;
   auto data = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
-  data_batch batch(1, manager, std::move(data));
+  data_batch batch(1, std::move(data));
 
-  // Perform many cycles of increment and decrement
+  // Perform many cycles of lock and unlock via handles
   for (int cycle = 0; cycle < 100; ++cycle) {
+    std::vector<data_batch_processing_handle> handles;
     for (int i = 0; i < 10; ++i) {
-      batch.increment_view_ref_count();
+      REQUIRE(batch.try_to_lock_for_processing() == true);
+      handles.emplace_back(&batch);
     }
-    REQUIRE(batch.get_view_count() == 10);
+    REQUIRE(batch.get_processing_count() == 10);
+    REQUIRE(batch.get_state() == batch_state::processing);
 
-    for (int i = 0; i < 10; ++i) {
-      batch.decrement_view_ref_count();
-    }
-    REQUIRE(batch.get_view_count() == 0);
+    handles.clear();  // Release all handles
+
+    REQUIRE(batch.get_processing_count() == 0);
+    REQUIRE(batch.get_state() == batch_state::at_rest);
   }
 
-  // Final state should be zero
-  REQUIRE(batch.get_view_count() == 0);
+  // Final state should be at_rest with zero count
+  REQUIRE(batch.get_processing_count() == 0);
+  REQUIRE(batch.get_state() == batch_state::at_rest);
 }
 
-// Test multiple rapid pin count increment/decrement cycles
-TEST_CASE("data_batch Rapid Pin Count Cycles", "[data_batch]")
+// Test smart pointer lifecycle management
+TEST_CASE("data_batch Smart Pointer Lifecycle", "[data_batch]")
 {
-  data_repository_manager manager;
-  auto data = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
-  data_batch batch(1, manager, std::move(data));
-
-  // Perform many cycles of increment and decrement
-  for (int cycle = 0; cycle < 100; ++cycle) {
-    for (int i = 0; i < 10; ++i) {
-      batch.increment_pin_ref_count();
-    }
-    REQUIRE(batch.get_pin_count() == 10);
-
-    for (int i = 0; i < 10; ++i) {
-      batch.decrement_pin_ref_count();
-    }
-    REQUIRE(batch.get_pin_count() == 0);
-  }
-
-  // Final state should be zero
-  REQUIRE(batch.get_pin_count() == 0);
-}
-
-// Test independent view and pin counts
-TEST_CASE("data_batch Independent View and Pin Counts", "[data_batch]")
-{
-  data_repository_manager manager;
-  auto data = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
-  data_batch batch(1, manager, std::move(data));
-
-  // Increment view count
-  batch.increment_view_ref_count();
-  batch.increment_view_ref_count();
-  batch.increment_view_ref_count();
-
-  // Increment pin count
-  batch.increment_pin_ref_count();
-  batch.increment_pin_ref_count();
-
-  // Verify counts are independent
-  REQUIRE(batch.get_view_count() == 3);
-  REQUIRE(batch.get_pin_count() == 2);
-
-  // Decrement view count
-  batch.decrement_view_ref_count();
-  REQUIRE(batch.get_view_count() == 2);
-  REQUIRE(batch.get_pin_count() == 2);  // Pin count unchanged
-
-  // Decrement pin count
-  batch.decrement_pin_ref_count();
-  REQUIRE(batch.get_view_count() == 2);  // View count unchanged
-  REQUIRE(batch.get_pin_count() == 1);
-}
-
-// =============================================================================
-// Tests for data_batch with data_repository_manager integration
-// =============================================================================
-
-// Test that data_batch can be managed by data_repository_manager
-TEST_CASE("data_batch With Data Repository Manager", "[data_batch][integration]")
-{
-  data_repository_manager manager;
-
-  auto data         = std::make_unique<mock_data_representation>(memory::Tier::GPU, 2048);
-  uint64_t batch_id = manager.get_next_data_batch_id();
-  auto batch        = std::make_unique<data_batch>(batch_id, manager, std::move(data));
-  auto* batch_ptr   = batch.get();
-
-  // Add to manager
-  std::vector<std::pair<size_t, std::string_view>> empty_pipelines;
-  manager.add_new_data_batch(std::move(batch), empty_pipelines);
-
-  // Batch is now managed by the manager
-  REQUIRE(batch_ptr->get_data_repository_manager() == &manager);
-  REQUIRE(batch_ptr->get_batch_id() == batch_id);
-  REQUIRE(batch_ptr->get_view_count() == 0);
-
-  // Create a view and let it go out of scope - this will trigger deletion
+  // Test with shared_ptr
   {
-    data_batch_view view(batch_ptr);
-    REQUIRE(batch_ptr->get_view_count() == 1);
+    auto batch = std::make_shared<data_batch>(
+      1, std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024));
+
+    REQUIRE(batch->get_batch_id() == 1);
+    REQUIRE(batch->get_processing_count() == 0);
+
+    // Copy the shared_ptr
+    auto batch_copy = batch;
+    REQUIRE(batch_copy->get_batch_id() == 1);
+
+    // Both point to the same batch
+    batch->try_to_lock_for_processing();
+    {
+      data_batch_processing_handle handle(batch.get());
+      REQUIRE(batch_copy->get_processing_count() == 1);
+    }  // Handle releases
+
+    REQUIRE(batch->get_processing_count() == 0);
   }
-  // Batch is now deleted by the manager
+
+  // Test with unique_ptr
+  {
+    auto batch = std::make_unique<data_batch>(
+      2, std::make_unique<mock_data_representation>(memory::Tier::GPU, 2048));
+
+    REQUIRE(batch->get_batch_id() == 2);
+    REQUIRE(batch->get_processing_count() == 0);
+
+    // Move the unique_ptr
+    auto batch_moved = std::move(batch);
+    REQUIRE(batch_moved->get_batch_id() == 2);
+    REQUIRE(batch == nullptr);
+  }
 }
 
-// Test view count returns old value correctly
-TEST_CASE("data_batch Decrement View Count Returns Old Value", "[data_batch]")
+// Test data_batch_processing_handle move semantics
+TEST_CASE("data_batch_processing_handle Move Semantics", "[data_batch]")
 {
-  data_repository_manager manager;
   auto data = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
-  data_batch batch(1, manager, std::move(data));
+  data_batch batch(1, std::move(data));
 
-  // Increment to 5
-  for (int i = 0; i < 5; ++i) {
-    batch.increment_view_ref_count();
-  }
-  REQUIRE(batch.get_view_count() == 5);
+  REQUIRE(batch.try_to_lock_for_processing() == true);
+  REQUIRE(batch.get_processing_count() == 1);
 
-  // Decrement and check old values
-  size_t old_count;
+  {
+    data_batch_processing_handle handle1(&batch);
 
-  old_count = batch.decrement_view_ref_count();
-  REQUIRE(old_count == 5);
-  REQUIRE(batch.get_view_count() == 4);
+    // Move construct
+    data_batch_processing_handle handle2(std::move(handle1));
 
-  old_count = batch.decrement_view_ref_count();
-  REQUIRE(old_count == 4);
-  REQUIRE(batch.get_view_count() == 3);
+    REQUIRE(handle1.valid() == false);
+    REQUIRE(handle2.valid() == true);
+    REQUIRE(batch.get_processing_count() == 1);  // Still 1, not decremented
 
-  old_count = batch.decrement_view_ref_count();
-  REQUIRE(old_count == 3);
-  REQUIRE(batch.get_view_count() == 2);
+  }  // handle2 goes out of scope, should decrement
 
-  old_count = batch.decrement_view_ref_count();
-  REQUIRE(old_count == 2);
-  REQUIRE(batch.get_view_count() == 1);
-
-  old_count = batch.decrement_view_ref_count();
-  REQUIRE(old_count == 1);
-  REQUIRE(batch.get_view_count() == 0);
+  REQUIRE(batch.get_processing_count() == 0);
+  REQUIRE(batch.get_state() == batch_state::at_rest);
 }
 
-// Test create_view method
-TEST_CASE("data_batch Create View", "[data_batch][integration]")
+// Test data_batch_processing_handle explicit release
+TEST_CASE("data_batch_processing_handle Explicit Release", "[data_batch]")
 {
-  data_repository_manager manager;
+  auto data = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
+  data_batch batch(1, std::move(data));
 
-  auto data         = std::make_unique<mock_data_representation>(memory::Tier::GPU, 1024);
-  uint64_t batch_id = manager.get_next_data_batch_id();
-  auto batch        = std::make_unique<data_batch>(batch_id, manager, std::move(data));
-  auto* batch_ptr   = batch.get();
+  REQUIRE(batch.try_to_lock_for_processing() == true);
+  data_batch_processing_handle handle(&batch);
 
-  // Add to manager
-  std::vector<std::pair<size_t, std::string_view>> empty_pipelines;
-  manager.add_new_data_batch(std::move(batch), empty_pipelines);
+  REQUIRE(batch.get_processing_count() == 1);
 
-  // Create view using the create_view method
-  auto view = batch_ptr->create_view();
-  REQUIRE(batch_ptr->get_view_count() == 1);
+  // Explicitly release
+  handle.release();
 
-  // Let view go out of scope - batch will be deleted
+  REQUIRE(batch.get_processing_count() == 0);
+  REQUIRE(handle.valid() == false);
+
+  // Double release should be safe (no-op)
+  handle.release();
+  REQUIRE(batch.get_processing_count() == 0);
+}
+
+// Test empty handle
+TEST_CASE("data_batch_processing_handle Empty Handle", "[data_batch]")
+{
+  // Default constructed handle
+  data_batch_processing_handle handle;
+
+  REQUIRE(handle.valid() == false);
+
+  // Release on empty handle should be safe
+  handle.release();
+  REQUIRE(handle.valid() == false);
 }

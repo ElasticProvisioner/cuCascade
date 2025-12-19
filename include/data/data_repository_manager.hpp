@@ -75,24 +75,24 @@ struct operator_port_key {
  * The manager abstracts the complexity of multi-pipeline data management and provides
  * a unified interface for higher-level components like the GPU executor and memory manager.
  *
+ * @tparam PtrType The smart pointer type used to manage data_batch lifecycle.
+ *                 Typically std::shared_ptr<data_batch> or std::unique_ptr<data_batch>.
+ *
  * @note All operations are thread-safe and can be called concurrently from multiple
  *       pipeline execution threads.
  */
+template <typename PtrType>
 class data_repository_manager {
-  // Friend declaration to allow data_batch_view destructor to call delete_data_batch
-  friend class data_batch_view;
-
  public:
+  using repository_type = idata_repository<PtrType>;
+
   /**
    * @brief Default constructor - initializes empty repository manager.
    */
   data_repository_manager() = default;
 
   /**
-   * @brief Destructor - ensures repositories are cleared before data batches.
-   *
-   * Repositories contain data_batch_view objects that reference data_batch objects.
-   * We must destroy all views before destroying the batches they reference.
+   * @brief Destructor - ensures repositories are cleared properly.
    */
   ~data_repository_manager() { _repositories.clear(); }
 
@@ -111,21 +111,32 @@ class data_repository_manager {
    */
   void add_new_repository(size_t operator_id,
                           std::string_view port_id,
-                          std::unique_ptr<idata_repository> repository);
+                          std::unique_ptr<repository_type> repository)
+  {
+    std::unique_ptr<repository_type> old_repository;
+    {
+      std::lock_guard<std::mutex> lock(_mutex);
+      auto it = _repositories.find({operator_id, std::string(port_id)});
+      if (it != _repositories.end()) { throw std::runtime_error("Repository already exists"); }
+      _repositories[{operator_id, std::string(port_id)}] = std::move(repository);
+    }
+  }
 
   /**
-   * @brief Add a new data_batch to the holder.
+   * @brief Add a data_batch to specified operator repositories.
    *
-   * This method stores the actual data_batch object in the manager's holder.
-   * data_batch_views reference these batches.
+   * For shared_ptr: The batch is copied to each repository.
+   * For unique_ptr: This method requires only one operator (single owner semantics).
    *
-   * @param batch The data_batch to add (ownership transferred)
-   * @param ops The operator IDs and ports whose repositories will receive views of this batch
+   * @param batch The data_batch smart pointer to add
+   * @param ops The operator IDs and ports whose repositories will receive this batch
    *
    * @note Thread-safe operation
    */
-  void add_new_data_batch(std::unique_ptr<data_batch> batch,
-                          std::vector<std::pair<size_t, std::string_view>> ops);
+  void add_data_batch(PtrType batch, std::vector<std::pair<size_t, std::string_view>> ops)
+  {
+    add_data_batch_impl(std::move(batch), ops);
+  }
 
   /**
    * @brief Get direct access to a repository for advanced operations.
@@ -135,13 +146,16 @@ class data_repository_manager {
    *
    * @param operator_id The unique ID of the operator whose repository is requested
    * @param port_id The port identifier for the repository
-   * @return std::unique_ptr<idata_repository>& Reference to the repository
+   * @return std::unique_ptr<repository_type>& Reference to the repository
    *
    * @throws std::out_of_range If no repository exists for the specified operator/port
    * @note Thread-safe for read access, but modifications should use the repository's own thread
    * safety
    */
-  std::unique_ptr<idata_repository>& get_repository(size_t operator_id, std::string_view port_id);
+  std::unique_ptr<repository_type>& get_repository(size_t operator_id, std::string_view port_id)
+  {
+    return _repositories.at({operator_id, std::string(port_id)});
+  }
 
   /**
    * @brief Generate a globally unique data batch identifier.
@@ -154,43 +168,64 @@ class data_repository_manager {
    *
    * @note Thread-safe atomic operation with no contention
    */
-  uint64_t get_next_data_batch_id();
+  uint64_t get_next_data_batch_id() { return _next_data_batch_id++; }
 
   /**
-   * @brief Get N batches from the manager where those batches reside in this memory space provided
-   * until the amount to downgrade is reached or there are no more batches in that memory space to
-   * downgrade.
+   * @brief Get N batches from the specified repositories for downgrade.
    *
    * @param memory_space_id The memory space id to get the data batches from
    * @param amount_to_downgrade The amount of data in bytes to downgrade
-   * @return std::vector<std::unique_ptr<data_batch>> A vector of data batches that are to be
-   * downgraded
+   * @return std::vector<PtrType> A vector of data batches that are candidates for downgrade
    */
-  std::vector<std::unique_ptr<data_batch>> get_data_batches_for_downgrade(
-    cucascade::memory::memory_space_id memory_space_id, size_t amount_to_downgrade);
+  std::vector<PtrType> get_data_batches_for_downgrade(
+    cucascade::memory::memory_space_id memory_space_id, size_t amount_to_downgrade)
+  {
+    std::vector<PtrType> data_batches;
+    // Note: Implementation would iterate through repositories and collect batches
+    // This is a placeholder - actual implementation depends on how batches are tracked
+    return data_batches;
+  }
 
  private:
-  /**
-   * @brief Delete a data batch from the manager.
-   *
-   * This method is private and can only be called by data_batch_view destructor
-   * when the last view to a batch is destroyed. This enforces proper lifecycle
-   * management through RAII and reference counting.
-   *
-   * @param batch_id The ID of the data batch to delete
-   *
-   * @note Thread-safe operation
-   * @note Private method - only accessible via friend class data_batch_view
-   */
-  void delete_data_batch(size_t batch_id);
+  // Implementation for shared_ptr - can copy to multiple repositories
+  template <typename T = PtrType>
+  typename std::enable_if<std::is_same<T, std::shared_ptr<data_batch>>::value>::type
+  add_data_batch_impl(T batch, std::vector<std::pair<size_t, std::string_view>>& ops)
+  {
+    std::lock_guard<std::mutex> lock(_mutex);
+    for (auto& op : ops) {
+      _repositories[{op.first, std::string(op.second)}]->add_data_batch(batch);
+    }
+  }
 
-  std::mutex _mutex;  ///< Mutex for thread-safe access to holder
+  // Implementation for unique_ptr - can only add to one repository (moves the batch)
+  template <typename T = PtrType>
+  typename std::enable_if<std::is_same<T, std::unique_ptr<data_batch>>::value>::type
+  add_data_batch_impl(T batch, std::vector<std::pair<size_t, std::string_view>>& ops)
+  {
+    std::lock_guard<std::mutex> lock(_mutex);
+    if (ops.size() > 1) {
+      throw std::runtime_error(
+        "unique_ptr data_batch can only be added to one repository. "
+        "Use shared_ptr for multiple destinations.");
+    }
+    if (!ops.empty()) {
+      auto& op = ops[0];
+      _repositories[{op.first, std::string(op.second)}]->add_data_batch(std::move(batch));
+    } else {
+      throw std::runtime_error("No operator ports provided");
+    }
+  }
+
+  std::mutex _mutex;  ///< Mutex for thread-safe access
   std::atomic<uint64_t> _next_data_batch_id =
     0;  ///< Atomic counter for generating unique data batch identifiers
-  std::map<operator_port_key, std::unique_ptr<idata_repository>>
-    _repositories;  ///< Map of operator ID to idata_repository (uses std::map for O(log n) lookups
-                    ///< without needing a hash function)
-  std::unordered_map<size_t, std::unique_ptr<data_batch>> _data_batches;
+  std::map<operator_port_key, std::unique_ptr<repository_type>>
+    _repositories;  ///< Map of operator ID to idata_repository
 };
+
+// Type aliases for common use cases
+using shared_data_repository_manager = data_repository_manager<std::shared_ptr<data_batch>>;
+using unique_data_repository_manager = data_repository_manager<std::unique_ptr<data_batch>>;
 
 }  // namespace cucascade
