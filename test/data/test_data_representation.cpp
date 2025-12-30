@@ -15,96 +15,37 @@
  * limitations under the License.
  */
 
-#include "data/common.hpp"
 #include "data/cpu_data_representation.hpp"
 #include "data/gpu_data_representation.hpp"
-#include "memory/common.hpp"
+#include "data/representation_converter.hpp"
 #include "memory/fixed_size_host_memory_resource.hpp"
 #include "memory/host_table.hpp"
 #include "memory/memory_reservation_manager.hpp"
-#include "memory/null_device_memory_resource.hpp"
 #include "utils/cudf_test_utils.hpp"
+#include "utils/mock_test_utils.hpp"
 
-#include <cudf/column/column_factories.hpp>
 #include <cudf/contiguous_split.hpp>
-#include <cudf/table/table.hpp>
-#include <cudf/types.hpp>
 
 #include <rmm/cuda_stream.hpp>
 #include <rmm/cuda_stream_view.hpp>
+#include <rmm/detail/error.hpp>
 
 #include <cuda_runtime_api.h>
 
 #include <catch2/catch.hpp>
 
-// Declarations provided by utils/cudf_test_utils.hpp
-
 #include <memory>
 #include <vector>
 
 using namespace cucascade;
-
-// Mock memory_space for testing - provides a simple memory_space without real allocators
-class mock_memory_space : public memory::memory_space {
- public:
-  mock_memory_space(memory::Tier tier, size_t device_id = 0)
-    : memory::memory_space(tier,
-                           static_cast<int>(device_id),
-                           1024 * 1024 * 1024,                      // memory_limit
-                           (1024ULL * 1024ULL * 1024ULL) * 8 / 10,  // start_downgrading_threshold
-                           (1024ULL * 1024ULL * 1024ULL) / 2,       // stop_downgrading_threshold
-                           1024 * 1024 * 1024,                      // capacity
-                           std::make_unique<memory::null_device_memory_resource>())
-  {
-  }
-};
+using cucascade::test::create_conversion_test_configs;
+using cucascade::test::create_simple_cudf_table;
+using cucascade::test::mock_memory_space;
 
 // Note: Tests that require mock host_table_allocation are disabled because
 // fixed_size_host_memory_resource::multiple_blocks_allocation is now private.
 // The real allocation tests below use actual memory resources.
 [[maybe_unused]] static constexpr bool MOCK_HOST_ALLOCATION_DISABLED = true;
-
-// Helper function to create a simple cuDF table for testing
-cudf::table create_simple_cudf_table(int num_rows = 100)
-{
-  std::vector<std::unique_ptr<cudf::column>> columns;
-
-  // Create and initialize a simple INT32 column
-  auto col1 = cudf::make_numeric_column(
-    cudf::data_type{cudf::type_id::INT32}, num_rows, cudf::mask_state::UNALLOCATED);
-  {
-    auto view  = col1->mutable_view();
-    auto bytes = static_cast<size_t>(num_rows) * sizeof(int32_t);
-    if (bytes > 0) cudaMemset(const_cast<void*>(view.head()), 0x11, bytes);
-  }
-
-  // Create and initialize another INT64 column
-  auto col2 = cudf::make_numeric_column(
-    cudf::data_type{cudf::type_id::INT64}, num_rows, cudf::mask_state::UNALLOCATED);
-  {
-    auto view  = col2->mutable_view();
-    auto bytes = static_cast<size_t>(num_rows) * sizeof(int64_t);
-    if (bytes > 0) cudaMemset(const_cast<void*>(view.head()), 0x22, bytes);
-  }
-
-  columns.push_back(std::move(col1));
-  columns.push_back(std::move(col2));
-
-  return cudf::table(std::move(columns));
-}
-
-// Initialize a minimal memory manager with one GPU(0) and one HOST(0)
-static void initialize_memory_for_conversions()
-{
-  using namespace cucascade::memory;
-  memory_reservation_manager::reset_for_testing();
-  std::vector<memory_reservation_manager::memory_space_config> configs;
-  configs.emplace_back(
-    Tier::GPU, 0, 2048ull * 1024 * 1024, make_default_allocator_for_tier(Tier::GPU));
-  configs.emplace_back(
-    Tier::HOST, 0, 4096ull * 1024 * 1024, make_default_allocator_for_tier(Tier::HOST));
-  memory_reservation_manager::initialize(std::move(configs));
-}
 
 // =============================================================================
 // host_table_representation Tests
@@ -137,8 +78,10 @@ TEST_CASE("host_table_representation device_id", "[cpu_data_representation][.dis
 TEST_CASE("host_table_representation converts to GPU and preserves contents",
           "[cpu_data_representation][gpu_data_representation]")
 {
-  initialize_memory_for_conversions();
-  auto& mgr                              = memory::memory_reservation_manager::get_instance();
+  memory::memory_reservation_manager mgr(create_conversion_test_configs());
+  representation_converter_registry registry;
+  register_builtin_converters(registry);
+
   const memory::memory_space* host_space = mgr.get_memory_space(memory::Tier::HOST, 0);
   const memory::memory_space* gpu_space  = mgr.get_memory_space(memory::Tier::GPU, 0);
 
@@ -161,10 +104,10 @@ TEST_CASE("host_table_representation converts to GPU and preserves contents",
     size_t remain = packed.gpu_data->size() - copied;
     size_t bytes  = std::min(remain, block_size - block_off);
     void* dst_ptr = reinterpret_cast<uint8_t*>((*allocation)[block_idx].data()) + block_off;
-    cudaMemcpy(dst_ptr,
-               static_cast<const uint8_t*>(packed.gpu_data->data()) + copied,
-               bytes,
-               cudaMemcpyDeviceToHost);
+    RMM_CUDA_TRY(cudaMemcpy(dst_ptr,
+                            static_cast<const uint8_t*>(packed.gpu_data->data()) + copied,
+                            bytes,
+                            cudaMemcpyDeviceToHost));
     copied += bytes;
     block_off += bytes;
     if (block_off == block_size) {
@@ -181,9 +124,9 @@ TEST_CASE("host_table_representation converts to GPU and preserves contents",
 
   // Convert to GPU and compare cudf tables
   auto gpu_stream = gpu_space->acquire_stream();
-  auto gpu_any    = host_repr.convert_to_memory_space(gpu_space, pack_stream);
+  auto gpu_any    = registry.convert<gpu_table_representation>(host_repr, gpu_space, pack_stream);
   pack_stream.synchronize();
-  auto& gpu_repr = gpu_any->cast<gpu_table_representation>();
+  auto& gpu_repr = *gpu_any;
   // Compare using the same stream used for conversion to avoid cross-stream hazards
   cucascade::test::expect_cudf_tables_equal_on_stream(
     original, gpu_repr.get_table(), pack_stream.view());
@@ -288,8 +231,10 @@ TEST_CASE("gpu_table_representation device_id", "[gpu_data_representation]")
 
 TEST_CASE("gpu->host->gpu roundtrip preserves cudf table contents", "[gpu_data_representation]")
 {
-  initialize_memory_for_conversions();
-  auto& mgr                              = memory::memory_reservation_manager::get_instance();
+  memory::memory_reservation_manager mgr(create_conversion_test_configs());
+  representation_converter_registry registry;
+  register_builtin_converters(registry);
+
   const memory::memory_space* gpu_space  = mgr.get_memory_space(memory::Tier::GPU, 0);
   const memory::memory_space* host_space = mgr.get_memory_space(memory::Tier::HOST, 0);
 
@@ -298,10 +243,10 @@ TEST_CASE("gpu->host->gpu roundtrip preserves cudf table contents", "[gpu_data_r
 
   // Use one stream for both conversions to enforce order
   auto chain_stream = gpu_space->acquire_stream();
-  auto cpu_any      = repr.convert_to_memory_space(host_space, chain_stream);
-  auto gpu_any      = cpu_any->convert_to_memory_space(gpu_space, chain_stream);
+  auto cpu_any      = registry.convert<host_table_representation>(repr, host_space, chain_stream);
+  auto gpu_any      = registry.convert<gpu_table_representation>(*cpu_any, gpu_space, chain_stream);
 
-  auto& back = gpu_any->cast<gpu_table_representation>();
+  auto& back = *gpu_any;
   chain_stream.synchronize();
   cucascade::test::expect_cudf_tables_equal_on_stream(
     repr.get_table(), back.get_table(), chain_stream);
@@ -311,14 +256,14 @@ TEST_CASE("gpu->host->gpu roundtrip preserves cudf table contents", "[gpu_data_r
 // =============================================================================
 // Multi-GPU Cross-Device Conversion Test
 // =============================================================================
-static void initialize_multi_gpu_for_conversions(int dev_a, int dev_b)
+static std::unique_ptr<memory::memory_reservation_manager> create_multi_gpu_manager(int dev_a,
+                                                                                    int dev_b)
 {
   using namespace cucascade::memory;
-  memory_reservation_manager::reset_for_testing();
   std::vector<memory_reservation_manager::memory_space_config> configs;
   configs.emplace_back(Tier::GPU, dev_a, 2048ull * 1024 * 1024);
   configs.emplace_back(Tier::GPU, dev_b, 2048ull * 1024 * 1024);
-  memory_reservation_manager::initialize(std::move(configs));
+  return std::make_unique<memory_reservation_manager>(std::move(configs));
 }
 
 TEST_CASE("gpu cross-device conversion when multiple GPUs are available",
@@ -334,10 +279,12 @@ TEST_CASE("gpu cross-device conversion when multiple GPUs are available",
   int dev_src = 0;
   int dev_dst = 1;
 
-  initialize_multi_gpu_for_conversions(dev_src, dev_dst);
-  auto& mgr                             = memory::memory_reservation_manager::get_instance();
-  const memory::memory_space* src_space = mgr.get_memory_space(memory::Tier::GPU, dev_src);
-  const memory::memory_space* dst_space = mgr.get_memory_space(memory::Tier::GPU, dev_dst);
+  auto mgr = create_multi_gpu_manager(dev_src, dev_dst);
+  representation_converter_registry registry;
+  register_builtin_converters(registry);
+
+  const memory::memory_space* src_space = mgr->get_memory_space(memory::Tier::GPU, dev_src);
+  const memory::memory_space* dst_space = mgr->get_memory_space(memory::Tier::GPU, dev_dst);
   REQUIRE(src_space != nullptr);
   REQUIRE(dst_space != nullptr);
 
@@ -348,8 +295,8 @@ TEST_CASE("gpu cross-device conversion when multiple GPUs are available",
 
   // Use a single stream for the peer copy
   auto xfer_stream = src_space->acquire_stream();
-  auto dst_any     = src_repr.convert_to_memory_space(dst_space, xfer_stream);
-  auto& dst_repr   = dst_any->cast<gpu_table_representation>();
+  auto dst_any     = registry.convert<gpu_table_representation>(src_repr, dst_space, xfer_stream);
+  auto& dst_repr   = *dst_any;
 
   // Compare content equality using the same stream used for transfer
   cucascade::test::expect_cudf_tables_equal_on_stream(

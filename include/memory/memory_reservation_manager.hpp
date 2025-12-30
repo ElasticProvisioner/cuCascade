@@ -65,9 +65,11 @@ struct reservation_request_strategy {
   static std::span<memory_space*> get_all_memory_resource(memory_reservation_manager& manager,
                                                           Tier tier);
 
-  static memory_space* get_memory_resource(memory_space_id source_id);
+  static memory_space* get_memory_resource(memory_reservation_manager& manager,
+                                           memory_space_id source_id);
 
-  static std::vector<memory_space*> get_memory_resource(std::span<memory_space_id> source_ids);
+  static std::vector<memory_space*> get_memory_resource(memory_reservation_manager& manager,
+                                                        std::span<memory_space_id> source_ids);
 
   bool _strong_ordering{false};
 };
@@ -170,8 +172,8 @@ struct any_memory_space_to_upgrade : public reservation_request_strategy {
 
 /**
  * Central manager for memory reservations across multiple memory spaces.
- * Implements singleton pattern and coordinates reservation requests using
- * different strategies (specific space, tier-based, multi-tier fallback).
+ * Coordinates reservation requests using different strategies
+ * (specific space, tier-based, multi-tier fallback).
  */
 class memory_reservation_manager {
   friend struct reservation;
@@ -210,24 +212,13 @@ class memory_reservation_manager {
   };
 
   /**
-   * Initialize the singleton instance with the given memory space configurations.
-   * Must be called before get_instance() can be used.
+   * Construct a memory_reservation_manager with the given memory space configurations.
+   * @param configs Vector of memory_space_config objects defining each memory space.
+   * @throws std::invalid_argument if configs is empty.
    */
-  static void initialize(std::vector<memory_space_config> configs);
+  explicit memory_reservation_manager(std::vector<memory_space_config> configs);
 
-  /**
-   * Test-only: Reset the singleton so tests can reinitialize with different configs.
-   * Not thread-safe; intended only for unit tests.
-   */
-  static void reset_for_testing();
-
-  /**
-   * Get the singleton instance.
-   * Throws if initialize() has not been called first.
-   */
-  static memory_reservation_manager& get_instance();
-
-  // Disable copy/move for singleton
+  // Non-copyable, non-movable (owns unique resources)
   memory_reservation_manager(const memory_reservation_manager&)            = delete;
   memory_reservation_manager& operator=(const memory_reservation_manager&) = delete;
   memory_reservation_manager(memory_reservation_manager&&)                 = delete;
@@ -284,20 +275,10 @@ class memory_reservation_manager {
   void shutdown();
 
  private:
-  /**
-   * Private constructor - use initialize() and get_instance() instead.
-   */
-  explicit memory_reservation_manager(std::vector<memory_space_config> configs);
-
   memory_space* get_mutable_memory_space(Tier tier, int32_t device_id);
   std::vector<memory_space*> get_mutable_memory_space(std::span<memory_space_id> ids);
   std::span<memory_space*> get_mutable_memory_spaces_for_tier(Tier tier);
   std::span<memory_space*> get_mutable_all_memory_spaces() noexcept;
-
-  // Singleton state
-  static std::unique_ptr<memory_reservation_manager> _instance;
-  static std::once_flag _initialized;
-  static bool _allow_reinitialize_for_tests;
 
   // Storage for memory_space instances (owned by the manager)
   std::vector<std::unique_ptr<memory_space>> _memory_spaces;

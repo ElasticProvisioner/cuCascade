@@ -49,16 +49,15 @@ std::span<memory_space*> reservation_request_strategy::get_all_memory_resource(
   return manager.get_mutable_memory_spaces_for_tier(tier);
 }
 
-memory_space* reservation_request_strategy::get_memory_resource(memory_space_id source_id)
+memory_space* reservation_request_strategy::get_memory_resource(memory_reservation_manager& manager,
+                                                                memory_space_id source_id)
 {
-  auto& manager = memory_reservation_manager::get_instance();
   return manager.get_mutable_memory_space(source_id.tier, source_id.device_id);
 }
 
 std::vector<memory_space*> reservation_request_strategy::get_memory_resource(
-  std::span<memory_space_id> source_ids)
+  memory_reservation_manager& manager, std::span<memory_space_id> source_ids)
 {
-  auto& manager = memory_reservation_manager::get_instance();
   return manager.get_mutable_memory_space(source_ids);
 }
 
@@ -97,9 +96,9 @@ std::vector<memory_space*> any_memory_space_in_tiers::get_candidates(
 }
 
 std::vector<memory_space*> specific_memory_space::get_candidates(
-  [[maybe_unused]] memory_reservation_manager& manager) const
+  memory_reservation_manager& manager) const
 {
-  auto* ms = this->get_memory_resource(target_id);
+  auto* ms = this->get_memory_resource(manager, target_id);
   if (ms) { return {ms}; }
   return {};
 }
@@ -119,10 +118,6 @@ std::vector<memory_space*> any_memory_space_to_upgrade::get_candidates(
 //===----------------------------------------------------------------------===//
 // memory_reservation_manager Implementation
 //===----------------------------------------------------------------------===//
-
-std::unique_ptr<memory_reservation_manager> memory_reservation_manager::_instance = nullptr;
-std::once_flag memory_reservation_manager::_initialized;
-bool memory_reservation_manager::_allow_reinitialize_for_tests{false};
 
 memory_reservation_manager::memory_reservation_manager(std::vector<memory_space_config> configs)
 {
@@ -172,37 +167,6 @@ memory_reservation_manager::memory_space_config::memory_space_config(
 {
   assert(memory_limit <= memory_capacity && "Memory limit cannot exceed device capacity");
   if (mr_factory_fn == nullptr) { mr_factory_fn = make_default_allocator_for_tier(t); }
-}
-
-void memory_reservation_manager::initialize(std::vector<memory_space_config> configs)
-{
-  // Test hook: if a test called reset_for_testing(), allow reinitialization bypassing call_once
-  if (_allow_reinitialize_for_tests) {
-    _allow_reinitialize_for_tests = false;
-    _instance                     = std::unique_ptr<memory_reservation_manager>(
-      new memory_reservation_manager(std::move(configs)));
-    return;
-  }
-  std::call_once(_initialized, [configs = std::move(configs)]() mutable {
-    _instance = std::unique_ptr<memory_reservation_manager>(
-      new memory_reservation_manager(std::move(configs)));
-  });
-}
-
-void memory_reservation_manager::reset_for_testing()
-{
-  // Not thread-safe; intended for unit tests only
-  _instance.reset();
-  _allow_reinitialize_for_tests = true;
-}
-
-memory_reservation_manager& memory_reservation_manager::get_instance()
-{
-  if (!_instance) {
-    throw std::runtime_error(
-      "memory_reservation_manager not initialized. Call initialize() first.");
-  }
-  return *_instance;
 }
 
 std::unique_ptr<reservation> memory_reservation_manager::request_reservation(

@@ -54,42 +54,39 @@ const size_t expected_gpu_capacity  = 2ull << 30;  // 2GB
 const size_t expected_host_capacity = 4ull << 30;  // 4GB
 const double limit_ratio            = 0.75;
 
-void initializeSingleDeviceMemoryManager()
+std::unique_ptr<memory_reservation_manager> createSingleDeviceMemoryManager()
 {
-  memory_reservation_manager::reset_for_testing();
   reservation_manager_configurator builder;
   builder.set_gpu_usage_limit(expected_gpu_capacity);  // 2 GB
   builder.set_reservation_limit_ratio_per_gpu(limit_ratio);
-  builder.set_capacity_per_numa_node(expected_host_capacity);  //  4 GB
+  builder.set_capacity_per_numa_node(expected_host_capacity);  //  4 GB
   builder.set_host_id_to_numa_maps({{0, -1}});
   builder.set_reservation_limit_ratio_per_numa_node(limit_ratio);
 
   auto space_configs = builder.build_with_topology();
-  memory_reservation_manager::initialize(std::move(space_configs));
+  return std::make_unique<memory_reservation_manager>(std::move(space_configs));
 }
 
-void initializeDualGpuMemoryManager()
+std::unique_ptr<memory_reservation_manager> createDualGpuMemoryManager()
 {
-  memory_reservation_manager::reset_for_testing();
   reservation_manager_configurator builder;
   builder.set_gpu_usage_limit(expected_gpu_capacity);  // 2 GB
   builder.set_reservation_limit_ratio_per_gpu(limit_ratio);
-  builder.set_capacity_per_numa_node(expected_host_capacity);  //  4 GB
+  builder.set_capacity_per_numa_node(expected_host_capacity);  //  4 GB
   builder.set_host_id_to_numa_maps({{0, -1}});
   builder.set_device_tier_id_to_gpu_id_map({{0, 0}, {1, 0}});
   builder.set_reservation_limit_ratio_per_numa_node(limit_ratio);
 
   auto space_configs = builder.build_with_topology();
-  memory_reservation_manager::initialize(std::move(space_configs));
+  return std::make_unique<memory_reservation_manager>(std::move(space_configs));
 }
 
 TEST_CASE("Single-Device Memory Space Access", "[memory_space]")
 {
-  initializeSingleDeviceMemoryManager();
-  auto& manager = memory_reservation_manager::get_instance();
+  auto manager = createSingleDeviceMemoryManager();
 
   // Test single GPU memory space
-  auto gpu_device_0 = manager.get_memory_space(Tier::GPU, 0);
+  auto gpu_device_0 = manager->get_memory_space(Tier::GPU, 0);
 
   REQUIRE(gpu_device_0 != nullptr);
   REQUIRE(gpu_device_0->get_tier() == Tier::GPU);
@@ -98,7 +95,7 @@ TEST_CASE("Single-Device Memory Space Access", "[memory_space]")
   REQUIRE(gpu_device_0->get_available_memory() == expected_gpu_capacity);
 
   // Test single HOST memory space (NUMA node)
-  auto host_numa_0 = manager.get_memory_space(Tier::HOST, 0);
+  auto host_numa_0 = manager->get_memory_space(Tier::HOST, 0);
 
   REQUIRE(host_numa_0 != nullptr);
   REQUIRE(host_numa_0->get_tier() == Tier::HOST);
@@ -107,8 +104,8 @@ TEST_CASE("Single-Device Memory Space Access", "[memory_space]")
   REQUIRE(host_numa_0->get_available_memory() == expected_host_capacity);
 
   // Test non-existent devices (only device 0 exists for each tier)
-  REQUIRE(manager.get_memory_space(Tier::GPU, 1) == nullptr);
-  REQUIRE(manager.get_memory_space(Tier::HOST, 1) == nullptr);
+  REQUIRE(manager->get_memory_space(Tier::GPU, 1) == nullptr);
+  REQUIRE(manager->get_memory_space(Tier::HOST, 1) == nullptr);
 
   // Verify all memory spaces are different objects
   REQUIRE(gpu_device_0 != host_numa_0);
@@ -116,21 +113,20 @@ TEST_CASE("Single-Device Memory Space Access", "[memory_space]")
 
 TEST_CASE("Device-Specific Memory Reservations", "[memory_space]")
 {
-  initializeSingleDeviceMemoryManager();
-  auto& manager = memory_reservation_manager::get_instance();
+  auto manager = createSingleDeviceMemoryManager();
 
   // Memory size constants
   const size_t gpu_allocation_size  = 200ull * 1024 * 1024;   // 200MB
   const size_t host_allocation_size = 500ull * 1024 * 1024;   // 500MB
   const size_t disk_allocation_size = 1000ull * 1024 * 1024;  // 1GB
 
-  auto gpu_device_0 = manager.get_memory_space(Tier::GPU, 0);
-  auto host_numa_0  = manager.get_memory_space(Tier::HOST, 0);
+  auto gpu_device_0 = manager->get_memory_space(Tier::GPU, 0);
+  auto host_numa_0  = manager->get_memory_space(Tier::HOST, 0);
 
   {
     // Test reservation on GPU device
     auto gpu_reservation =
-      manager.request_reservation(specific_memory_space(Tier::GPU, 0), gpu_allocation_size);
+      manager->request_reservation(specific_memory_space(Tier::GPU, 0), gpu_allocation_size);
     REQUIRE(gpu_reservation != nullptr);
     REQUIRE(gpu_reservation->tier() == Tier::GPU);
     REQUIRE(gpu_reservation->device_id() == 0);
@@ -147,7 +143,7 @@ TEST_CASE("Device-Specific Memory Reservations", "[memory_space]")
 
     // // Test reservation on HOST NUMA node
     auto host_reservation =
-      manager.request_reservation(any_memory_space_in_tier(Tier::HOST), host_allocation_size);
+      manager->request_reservation(any_memory_space_in_tier(Tier::HOST), host_allocation_size);
     REQUIRE(host_reservation != nullptr);
     REQUIRE(host_reservation->tier() == Tier::HOST);
     REQUIRE(host_reservation->device_id() == 0);
@@ -171,8 +167,7 @@ TEST_CASE("Device-Specific Memory Reservations", "[memory_space]")
 
 TEST_CASE("Reservation Strategies with Single Device", "[memory_space]")
 {
-  initializeSingleDeviceMemoryManager();
-  auto& manager = memory_reservation_manager::get_instance();
+  auto manager = createSingleDeviceMemoryManager();
 
   // Test allocation sizes
   const size_t small_allocation  = 25ull * 1024 * 1024;   // 25MB
@@ -181,7 +176,7 @@ TEST_CASE("Reservation Strategies with Single Device", "[memory_space]")
 
   // Test requesting reservation in any GPU
   auto gpu_any_reservation =
-    manager.request_reservation(any_memory_space_in_tier(Tier::GPU), medium_allocation);
+    manager->request_reservation(any_memory_space_in_tier(Tier::GPU), medium_allocation);
   REQUIRE(gpu_any_reservation != nullptr);
   REQUIRE(gpu_any_reservation->tier() == Tier::GPU);
   REQUIRE(gpu_any_reservation->size() == medium_allocation);
@@ -192,7 +187,7 @@ TEST_CASE("Reservation Strategies with Single Device", "[memory_space]")
   // Test requesting reservation across multiple tiers (simulates "anywhere")
   std::vector<Tier> any_tier_preferences = {Tier::GPU, Tier::HOST, Tier::DISK};
   auto anywhere_reservation =
-    manager.request_reservation(any_memory_space_in_tiers(any_tier_preferences), small_allocation);
+    manager->request_reservation(any_memory_space_in_tiers(any_tier_preferences), small_allocation);
   REQUIRE(anywhere_reservation != nullptr);
   REQUIRE(anywhere_reservation->size() == small_allocation);
 
@@ -204,7 +199,7 @@ TEST_CASE("Reservation Strategies with Single Device", "[memory_space]")
   // Test specific memory space in tiers list with HOST preference
   std::vector<Tier> tier_preferences = {Tier::HOST, Tier::GPU, Tier::DISK};
   auto preference_reservation =
-    manager.request_reservation(any_memory_space_in_tiers(tier_preferences), large_allocation);
+    manager->request_reservation(any_memory_space_in_tiers(tier_preferences), large_allocation);
   REQUIRE(preference_reservation != nullptr);
   REQUIRE(preference_reservation->size() == large_allocation);
 
@@ -214,8 +209,7 @@ TEST_CASE("Reservation Strategies with Single Device", "[memory_space]")
 
 SCENARIO("multi-reservation memory_resource mismatch", "[memory_space]")
 {
-  initializeSingleDeviceMemoryManager();
-  auto& manager = memory_reservation_manager::get_instance();
+  auto manager = createSingleDeviceMemoryManager();
 
   const size_t res_size         = 1ull * 1024 * 1024;  // 1MB
   const size_t small_alloc_size = res_size / 2;        // 512KB
@@ -223,8 +217,8 @@ SCENARIO("multi-reservation memory_resource mismatch", "[memory_space]")
 
   GIVEN("Two reservations of 1MB each on different on different streams")
   {
-    auto res1 = manager.request_reservation(specific_memory_space{Tier::GPU, 0}, res_size);
-    auto res2 = manager.request_reservation(specific_memory_space{Tier::GPU, 0}, res_size);
+    auto res1 = manager->request_reservation(specific_memory_space{Tier::GPU, 0}, res_size);
+    auto res2 = manager->request_reservation(specific_memory_space{Tier::GPU, 0}, res_size);
 
     auto* mr = res1->get_memory_resource_of<Tier::GPU>();
     rmm::cuda_stream stream1, stream2;
@@ -261,14 +255,13 @@ SCENARIO("multi-reservation memory_resource mismatch", "[memory_space]")
 
 SCENARIO("Peak Tracking On Streams with Reservation", "[memory_space][tracking]")
 {
-  initializeSingleDeviceMemoryManager();
-  auto& manager                 = memory_reservation_manager::get_instance();
+  auto manager                  = createSingleDeviceMemoryManager();
   const size_t reservation_size = 2048;
   const size_t chunk_size       = 1024;
 
   GIVEN("A reservation of specific size[= 2048] on GPU")
   {
-    auto res = manager.request_reservation(specific_memory_space{Tier::GPU, 0}, reservation_size);
+    auto res = manager->request_reservation(specific_memory_space{Tier::GPU, 0}, reservation_size);
     REQUIRE(res->size() == reservation_size);
     REQUIRE(res->tier() == Tier::GPU);
     auto* mr = res->get_memory_resource_of<Tier::GPU>();
@@ -338,15 +331,15 @@ SCENARIO("Peak Tracking On Streams with Reservation", "[memory_space][tracking]"
 
 SCENARIO("Reservation Concepts on Single Gpu Manager", "[memory_space]")
 {
-  initializeSingleDeviceMemoryManager();
-  auto& manager                 = memory_reservation_manager::get_instance();
+  auto manager                  = createSingleDeviceMemoryManager();
   const size_t reservation_size = 1024;
 
   GIVEN("A single gpu manager")
   {
     WHEN("a reservation is made with overflow policy to ignore")
     {
-      auto res = manager.request_reservation(specific_memory_space{Tier::GPU, 0}, reservation_size);
+      auto res =
+        manager->request_reservation(specific_memory_space{Tier::GPU, 0}, reservation_size);
       REQUIRE(res->size() == reservation_size);
       REQUIRE(res->tier() == Tier::GPU);
       auto* mr = res->get_memory_resource_as<reservation_aware_resource_adaptor>();
@@ -402,15 +395,15 @@ SCENARIO("Reservation Concepts on Single Gpu Manager", "[memory_space]")
 
 SCENARIO("Reservation Overflow Policy", "[memory_space][.overflow_policy]")
 {
-  initializeSingleDeviceMemoryManager();
-  auto& manager                 = memory_reservation_manager::get_instance();
+  auto manager                  = createSingleDeviceMemoryManager();
   const size_t reservation_size = 1024;
 
   GIVEN("A single gpu manager")
   {
     WHEN("allocation beyond reservation with ignore policy")
     {
-      auto res = manager.request_reservation(specific_memory_space{Tier::GPU, 0}, reservation_size);
+      auto res =
+        manager->request_reservation(specific_memory_space{Tier::GPU, 0}, reservation_size);
       REQUIRE(res->tier() == Tier::GPU);
       REQUIRE(res->size() == reservation_size);
       auto* mr = res->get_memory_resource_of<Tier::GPU>();
@@ -431,7 +424,8 @@ SCENARIO("Reservation Overflow Policy", "[memory_space][.overflow_policy]")
 
     WHEN("allocation beyond reservation with fail policy")
     {
-      auto res = manager.request_reservation(specific_memory_space{Tier::GPU, 0}, reservation_size);
+      auto res =
+        manager->request_reservation(specific_memory_space{Tier::GPU, 0}, reservation_size);
       REQUIRE(res->tier() == Tier::GPU);
       REQUIRE(res->size() == reservation_size);
 
@@ -450,7 +444,8 @@ SCENARIO("Reservation Overflow Policy", "[memory_space][.overflow_policy]")
 
     WHEN("allocation beyond reservation with increase policy")
     {
-      auto res = manager.request_reservation(specific_memory_space{Tier::GPU, 0}, reservation_size);
+      auto res =
+        manager->request_reservation(specific_memory_space{Tier::GPU, 0}, reservation_size);
       REQUIRE(res->tier() == Tier::GPU);
       REQUIRE(res->size() == reservation_size);
 
@@ -474,12 +469,11 @@ SCENARIO("Reservation Overflow Policy", "[memory_space][.overflow_policy]")
 
 SCENARIO("Reservation On Multi Gpu System", "[memory_space][.multi-device]")
 {
-  initializeDualGpuMemoryManager();
-  auto& manager = memory_reservation_manager::get_instance();
+  auto manager = createDualGpuMemoryManager();
 
-  auto gpu_device_0 = manager.get_memory_space(Tier::GPU, 0);
-  auto gpu_device_1 = manager.get_memory_space(Tier::GPU, 1);
-  auto host_numa_0  = manager.get_memory_space(Tier::HOST, 0);
+  auto gpu_device_0 = manager->get_memory_space(Tier::GPU, 0);
+  auto gpu_device_1 = manager->get_memory_space(Tier::GPU, 1);
+  auto host_numa_0  = manager->get_memory_space(Tier::HOST, 0);
 
   // Test that we can get default allocators from each device
   auto gpu_0_allocator  = gpu_device_0->get_default_allocator();
@@ -493,7 +487,7 @@ SCENARIO("Reservation On Multi Gpu System", "[memory_space][.multi-device]")
 
   GIVEN("Dual gpu manager")
   {
-    auto* gpu_space = manager.get_memory_space(Tier::GPU, 0);
+    auto* gpu_space = manager->get_memory_space(Tier::GPU, 0);
     auto* mr =
       dynamic_cast<reservation_aware_resource_adaptor*>(gpu_space->get_default_allocator());
     REQUIRE(mr != nullptr);
@@ -502,7 +496,7 @@ SCENARIO("Reservation On Multi Gpu System", "[memory_space][.multi-device]")
     {
       size_t large_reservation = expected_gpu_capacity * limit_ratio - 1024;
       auto res =
-        manager.request_reservation(specific_memory_space{Tier::GPU, 0}, large_reservation);
+        manager->request_reservation(specific_memory_space{Tier::GPU, 0}, large_reservation);
       REQUIRE(res->size() == large_reservation);
       REQUIRE(res->tier() == Tier::GPU);
       REQUIRE(res->device_id() == 0);
@@ -510,7 +504,7 @@ SCENARIO("Reservation On Multi Gpu System", "[memory_space][.multi-device]")
       THEN("reservation made on gpu 1")
       {
         auto other_res =
-          manager.request_reservation(any_memory_space_in_tier{Tier::GPU}, large_reservation);
+          manager->request_reservation(any_memory_space_in_tier{Tier::GPU}, large_reservation);
         REQUIRE(other_res->size() == large_reservation);
         REQUIRE(other_res->tier() == Tier::GPU);
         REQUIRE(other_res->device_id() == 1);
@@ -521,8 +515,7 @@ SCENARIO("Reservation On Multi Gpu System", "[memory_space][.multi-device]")
 
 SCENARIO("Host Reservation", "[memory_space][host_reservation]")
 {
-  initializeSingleDeviceMemoryManager();
-  auto& manager                = memory_reservation_manager::get_instance();
+  auto manager                 = createSingleDeviceMemoryManager();
   std::size_t reservation_size = 2UL << 20;
   std::size_t small_allocation = 1UL << 20;
   std::size_t large_allocation = 4UL << 20;
@@ -530,7 +523,7 @@ SCENARIO("Host Reservation", "[memory_space][host_reservation]")
   GIVEN("making a host reservation")
   {
     auto reservation =
-      manager.request_reservation(any_memory_space_in_tier{Tier::HOST}, reservation_size);
+      manager->request_reservation(any_memory_space_in_tier{Tier::HOST}, reservation_size);
     REQUIRE(reservation->size() == reservation_size);
     REQUIRE(reservation->tier() == Tier::HOST);
     auto* mr = reservation->get_memory_resource_of<Tier::HOST>();

@@ -15,17 +15,25 @@
  * limitations under the License.
  */
 
-#define CATCH_CONFIG_RUNNER
+#include "memory/oom_handling_policy.hpp"
 
-#include <catch2/catch.hpp>
+namespace cucascade {
+namespace memory {
 
-#include <cstdlib>
-
-int main(int argc, char* argv[])
+void* throw_on_oom_policy::do_handle_oom([[maybe_unused]] std::size_t bytes,
+                                         [[maybe_unused]] rmm::cuda_stream_view stream,
+                                         std::exception_ptr eptr,
+                                         [[maybe_unused]] RetryFunc retry_function)
 {
-  // Run tests
-  int code = Catch::Session().run(argc, argv);
-  std::fflush(stdout);
-  std::fflush(stderr);
-  return code;
+  std::rethrow_exception(eptr);
 }
+
+std::string throw_on_oom_policy::get_policy_name() const noexcept { return "rethrow"; }
+
+std::unique_ptr<oom_handling_policy> make_default_oom_policy()
+{
+  return std::make_unique<throw_on_oom_policy>();
+}
+
+}  // namespace memory
+}  // namespace cucascade

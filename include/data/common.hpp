@@ -68,22 +68,25 @@ class idata_representation {
   int get_device_id() const { return _memory_space.get_device_id(); }
 
   /**
+   * @brief Get the memory space where the data resides
+   *
+   * @return memory_space& Reference to the memory space
+   */
+  cucascade::memory::memory_space& get_memory_space() { return _memory_space; }
+
+  /**
+   * @brief Get the memory space where the data resides (const version)
+   *
+   * @return const memory_space& Const reference to the memory space
+   */
+  const cucascade::memory::memory_space& get_memory_space() const { return _memory_space; }
+
+  /**
    * @brief Get the size of the data representation in bytes
    *
    * @return std::size_t The number of bytes used to store this representation
    */
   virtual std::size_t get_size_in_bytes() const = 0;
-
-  /**
-   * @brief Convert this data representation to a different memory tier
-   *
-   * @param target_memory_space The target memory space to convert to
-   * @param stream CUDA stream to use for memory operations
-   * @return std::unique_ptr<idata_representation> A new data representation in the target memory
-   * space
-   */
-  virtual std::unique_ptr<idata_representation> convert_to_memory_space(
-    const cucascade::memory::memory_space* target_memory_space, rmm::cuda_stream_view stream) = 0;
 
   /**
    * @brief Safely casts this interface to a specific derived type

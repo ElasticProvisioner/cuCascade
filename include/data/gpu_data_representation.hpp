@@ -61,17 +61,6 @@ class gpu_table_representation : public idata_representation {
    */
   const cudf::table& get_table() const;
 
-  /**
-   * @brief Convert this GPU table representation to a different memory tier
-   *
-   * @param stream CUDA stream to use for memory operations
-   * @return std::unique_ptr<idata_representation> A new data representation in the target memory
-   * space
-   */
-  std::unique_ptr<idata_representation> convert_to_memory_space(
-    const cucascade::memory::memory_space* target_memory_space,
-    rmm::cuda_stream_view stream = rmm::cuda_stream_default) override;
-
  private:
   cudf::table _table;  ///< The actual cuDF table with the data
 };

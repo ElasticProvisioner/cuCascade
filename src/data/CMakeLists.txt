@@ -1,5 +1,6 @@
 # =============================================================================
-# Copyright 2025, cuCascade Contributors.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES.
+# All rights reserved. SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may not
 # use this file except in compliance with the License. You may obtain a copy of
@@ -20,4 +21,5 @@ target_sources(
           ${CMAKE_CURRENT_SOURCE_DIR}/data_batch.cpp
           ${CMAKE_CURRENT_SOURCE_DIR}/data_repository.cpp
           ${CMAKE_CURRENT_SOURCE_DIR}/data_repository_manager.cpp
-          ${CMAKE_CURRENT_SOURCE_DIR}/gpu_data_representation.cpp)
+          ${CMAKE_CURRENT_SOURCE_DIR}/gpu_data_representation.cpp
+          ${CMAKE_CURRENT_SOURCE_DIR}/representation_converter.cpp)

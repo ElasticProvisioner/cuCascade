@@ -18,7 +18,6 @@
 #include "data/data_batch.hpp"
 
 #include "data/gpu_data_representation.hpp"
-#include "memory/memory_reservation_manager.hpp"
 
 namespace cucascade {
 
@@ -92,9 +91,7 @@ idata_representation* data_batch::get_data() const { return _data.get(); }
 cucascade::memory::memory_space* data_batch::get_memory_space() const
 {
   if (_data == nullptr) { return nullptr; }
-  auto& manager = cucascade::memory::memory_reservation_manager::get_instance();
-  auto* space   = manager.get_memory_space(_data->get_current_tier(), _data->get_device_id());
-  return const_cast<cucascade::memory::memory_space*>(space);
+  return &_data->get_memory_space();
 }
 
 void data_batch::set_data(std::unique_ptr<idata_representation> data)
@@ -104,18 +101,6 @@ void data_batch::set_data(std::unique_ptr<idata_representation> data)
     throw std::runtime_error("Cannot set data while there is active processing");
   }
   _data = std::move(data);
-}
-
-void data_batch::convert_to_memory_space(const cucascade::memory::memory_space* target_memory_space,
-                                         rmm::cuda_stream_view stream)
-{
-  std::lock_guard<std::mutex> lock(_mutex);
-
-  if (_processing_count != 0) {
-    throw std::runtime_error("Cannot convert memory space while there is active processing");
-  }
-  auto new_representation = _data->convert_to_memory_space(target_memory_space, stream);
-  _data                   = std::move(new_representation);
 }
 
 bool data_batch::try_to_lock_for_processing()

@@ -18,6 +18,7 @@
 #pragma once
 
 #include "data/common.hpp"
+#include "data/representation_converter.hpp"
 
 #include <cudf/table/table.hpp>
 
@@ -223,11 +224,23 @@ class data_batch {
   void set_data(std::unique_ptr<idata_representation> data);
 
   /**
-   * @brief Convert the underlying representation to the target memory_space.
+   * @brief Convert the underlying representation to the target representation type.
    *        Requires no active processing.
+   *
+   * Uses the provided representation_converter_registry to look up the appropriate converter
+   * from the current representation type to the target type.
+   *
+   * @tparam TargetRepresentation The target idata_representation type to convert to
+   * @param registry The converter registry to use for looking up converters
+   * @param target_memory_space The memory space where the new representation will be allocated
+   * @param stream CUDA stream for memory operations
+   * @throws std::runtime_error if no converter is registered for the type pair
+   * @throws std::runtime_error if there is active processing on this batch
    */
-  void convert_to_memory_space(const cucascade::memory::memory_space* target_memory_space,
-                               rmm::cuda_stream_view stream);
+  template <typename TargetRepresentation>
+  void convert_to(representation_converter_registry& registry,
+                  const cucascade::memory::memory_space* target_memory_space,
+                  rmm::cuda_stream_view stream);
 
   /**
    * @brief Attempt to lock this batch for processing operations.
@@ -265,5 +278,22 @@ class data_batch {
   size_t _processing_count = 0;                     ///< Count of active processing handles
   batch_state _state       = batch_state::at_rest;  ///< Current state of the batch
 };
+
+// Template implementation
+template <typename TargetRepresentation>
+void data_batch::convert_to(representation_converter_registry& registry,
+                            const cucascade::memory::memory_space* target_memory_space,
+                            rmm::cuda_stream_view stream)
+{
+  std::lock_guard<std::mutex> lock(_mutex);
+
+  if (_processing_count != 0) {
+    throw std::runtime_error("Cannot convert representation while there is active processing");
+  }
+
+  auto new_representation =
+    registry.convert<TargetRepresentation>(*_data, target_memory_space, stream);
+  _data = std::move(new_representation);
+}
 
 }  // namespace cucascade

@@ -61,17 +61,6 @@ class host_table_representation : public idata_representation {
    */
   const std::unique_ptr<cucascade::memory::host_table_allocation>& get_host_table() const;
 
-  /**
-   * @brief Convert this CPU table representation to a different memory tier
-   *
-   * @param target_memory_space The target memory space to convert to
-   * @param stream CUDA stream to use for memory operations
-   * @return std::unique_ptr<idata_representation> A new data representation in the target tier
-   */
-  std::unique_ptr<idata_representation> convert_to_memory_space(
-    const cucascade::memory::memory_space* target_memory_space,
-    rmm::cuda_stream_view stream = rmm::cuda_stream_default) override;
-
  private:
   std::unique_ptr<cucascade::memory::host_table_allocation>
     _host_table;  ///< The allocation where the actual data resides
