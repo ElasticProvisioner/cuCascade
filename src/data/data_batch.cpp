@@ -17,20 +17,29 @@
 
 #include <cucascade/data/data_batch.hpp>
 
+#include <memory>
+#include <mutex>
+#include <stdexcept>
+
 namespace cucascade {
 
 // ========== data_batch implementation ==========
 
 std::shared_ptr<data_batch> data_batch::make(uint64_t batch_id,
-                                             std::unique_ptr<idata_representation> data)
+                                             std::unique_ptr<idata_representation> data,
+                                             std::unique_ptr<idata_batch_probe> probe)
 {
   if (data == nullptr) { throw std::runtime_error("data is null in data_batch factory"); }
-  return std::shared_ptr<data_batch>(new data_batch(batch_id, std::move(data)));
+  if (probe == nullptr) { throw std::runtime_error("probe is null in data_batch factory"); }
+  return std::shared_ptr<data_batch>(new data_batch(batch_id, std::move(data), std::move(probe)));
 }
 
-data_batch::data_batch(uint64_t batch_id, std::unique_ptr<idata_representation> data)
-  : _batch_id(batch_id), _data(std::move(data))
+data_batch::data_batch(uint64_t batch_id,
+                       std::unique_ptr<idata_representation> data,
+                       std::unique_ptr<idata_batch_probe> probe)
+  : _batch_id(batch_id), _data(std::move(data)), _probe(std::move(probe))
 {
+  _probe->created(get_batch_id(), *get_data());
 }
 
 uint64_t data_batch::get_batch_id() const { return _batch_id; }
@@ -68,7 +77,12 @@ memory::memory_space* data_batch::get_memory_space() const
   return &_data->get_memory_space();
 }
 
-void data_batch::set_data(std::unique_ptr<idata_representation> data) { _data = std::move(data); }
+void data_batch::set_data(std::unique_ptr<idata_representation> data)
+{
+  if (data == nullptr) { throw std::runtime_error("data is null in data_batch::set_data"); }
+  _data = std::move(data);
+  _probe->data_replaced(*_data);
+}
 
 // ========== Static transition methods ==========
 
@@ -176,7 +190,7 @@ read_only_data_batch& read_only_data_batch::operator=(read_only_data_batch&& oth
   if (this != &other) {
     // Release the current state (same logic as destructor)
     if (_batch) {
-      auto prev = _batch->_read_only_count.fetch_sub(1);
+      size_t prev = _batch->_read_only_count.fetch_sub(1);
       if (prev == 1) { _batch->_state.store(batch_state::idle); }
       // _lock will be replaced below; its destructor fires when the old _lock is overwritten,
       // releasing the shared lock. We release _lock explicitly here so the sequence is:
@@ -193,7 +207,7 @@ read_only_data_batch& read_only_data_batch::operator=(const read_only_data_batch
 {
   if (this != &other) {
     if (_batch) {
-      auto prev = _batch->_read_only_count.fetch_sub(1);
+      size_t prev = _batch->_read_only_count.fetch_sub(1);
       if (prev == 1) { _batch->_state.store(batch_state::idle); }
       _lock.unlock();
     }
@@ -217,17 +231,19 @@ read_only_data_batch::~read_only_data_batch()
     // The destructor body runs before member destructors, so _batch is still valid here.
     // After this function returns, _lock destructor fires first (declared after _batch,
     // destroyed in reverse order), releasing the shared lock. Then _batch destructor fires.
-    auto prev = _batch->_read_only_count.fetch_sub(1);
+    size_t prev = _batch->_read_only_count.fetch_sub(1);
     if (prev == 1) { _batch->_state.store(batch_state::idle); }
   }
 }
 
-std::shared_ptr<data_batch> read_only_data_batch::clone(uint64_t new_batch_id,
-                                                        rmm::cuda_stream_view stream) const
+std::shared_ptr<data_batch> read_only_data_batch::clone(
+  uint64_t new_batch_id,
+  rmm::cuda_stream_view stream,
+  std::unique_ptr<idata_batch_probe> probe) const
 {
   if (_batch->_data == nullptr) { throw std::runtime_error("Cannot clone: data is null"); }
   auto cloned_data = _batch->_data->clone(stream);
-  return data_batch::make(new_batch_id, std::move(cloned_data));
+  return data_batch::make(new_batch_id, std::move(cloned_data), std::move(probe));
 }
 
 // ========== mutable_data_batch ==========
@@ -273,12 +289,14 @@ void mutable_data_batch::rebind_stream(rmm::cuda_stream_view stream)
   if (auto* repr = _batch->get_data()) { repr->rebind_stream(stream); }
 }
 
-std::shared_ptr<data_batch> mutable_data_batch::clone(uint64_t new_batch_id,
-                                                      rmm::cuda_stream_view stream) const
+std::shared_ptr<data_batch> mutable_data_batch::clone(
+  uint64_t new_batch_id,
+  rmm::cuda_stream_view stream,
+  std::unique_ptr<idata_batch_probe> probe) const
 {
   if (_batch->_data == nullptr) { throw std::runtime_error("Cannot clone: data is null"); }
   auto cloned_data = _batch->_data->clone(stream);
-  return data_batch::make(new_batch_id, std::move(cloned_data));
+  return data_batch::make(new_batch_id, std::move(cloned_data), std::move(probe));
 }
 
 }  // namespace cucascade
