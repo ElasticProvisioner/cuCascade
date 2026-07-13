@@ -58,7 +58,8 @@ std::unique_ptr<idata_representation> representation_converter_registry::convert
   const converter_key& key,
   idata_representation& source,
   const memory::memory_space* target_memory_space,
-  rmm::cuda_stream_view stream) const
+  rmm::cuda_stream_view stream,
+  memory::reservation* reservation) const
 {
   representation_converter_fn converter;
   {
@@ -75,7 +76,7 @@ std::unique_ptr<idata_representation> representation_converter_registry::convert
     converter = it->second;
   }
 
-  return converter(source, target_memory_space, stream);
+  return converter(source, target_memory_space, stream, reservation);
 }
 
 std::unique_ptr<idata_representation> representation_converter_registry::convert(
@@ -85,7 +86,7 @@ std::unique_ptr<idata_representation> representation_converter_registry::convert
   rmm::cuda_stream_view stream) const
 {
   converter_key key{std::type_index(typeid(source)), target_type};
-  return convert_impl(key, source, target_memory_space, stream);
+  return convert_impl(key, source, target_memory_space, stream, nullptr);
 }
 
 bool representation_converter_registry::unregister_converter_impl(const converter_key& key)

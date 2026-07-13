@@ -18,6 +18,7 @@
 #pragma once
 
 #include <cucascade/data/common.hpp>
+#include <cucascade/memory/memory_reservation.hpp>
 #include <cucascade/memory/memory_space.hpp>
 
 #include <rmm/cuda_stream_view.hpp>
@@ -42,12 +43,20 @@ namespace cucascade {
  * @param source The source data representation to convert from
  * @param target_memory_space The memory space where the target representation will be allocated
  * @param stream CUDA stream for asynchronous memory operations
+ * @param reservation Optional caller-owned reservation on the target memory space. When non-null,
+ *        the converter draws its target allocation down from this reservation instead of committing
+ *        fresh capacity, preventing double-counting against the target pool. May be nullptr.
  * @return A new idata_representation of the registered target type (always unique_ptr)
+ *
+ * @note Because std::function cannot carry default arguments, every registered converter must
+ *       accept this parameter. Converters whose target tier does not honor reservations (GPU/DISK)
+ *       ignore it.
  */
 using representation_converter_fn = std::function<std::unique_ptr<idata_representation>(
   idata_representation& source,
   const memory::memory_space* target_memory_space,
-  rmm::cuda_stream_view stream)>;
+  rmm::cuda_stream_view stream,
+  memory::reservation* reservation)>;
 
 /**
  * @brief Key for looking up converters in the registry.
@@ -118,7 +127,8 @@ class representation_converter_registry {
    * registry.register_converter<SourceType, TargetType>(
    *   [](idata_representation& source,
    *      const memory::memory_space* target_memory_space,
-   *      rmm::cuda_stream_view stream) -> std::unique_ptr<idata_representation> {
+   *      rmm::cuda_stream_view stream,
+   *      memory::reservation* reservation) -> std::unique_ptr<idata_representation> {
    *     auto& src = source.cast<SourceType>();
    *     // ... conversion logic ...
    *     return std::make_unique<TargetType>(...);
@@ -189,7 +199,32 @@ class representation_converter_registry {
                                       rmm::cuda_stream_view stream = rmm::cuda_stream_default) const
   {
     converter_key key{std::type_index(typeid(source)), std::type_index(typeid(TargetType))};
-    auto result = convert_impl(key, source, target_memory_space, stream);
+    auto result = convert_impl(key, source, target_memory_space, stream, nullptr);
+    return std::unique_ptr<TargetType>(static_cast<TargetType*>(result.release()));
+  }
+
+  /**
+   * @brief Convert a data representation, drawing the target allocation from a reservation.
+   *
+   * The target memory space is derived from the reservation (reservation::get_memory_space()) and
+   * the reservation is threaded into the converter so the target allocation draws down the
+   * reservation instead of committing fresh capacity. Use this overload whenever the caller has
+   * already reserved capacity on the target space (avoids double-counting on the HOST tier).
+   *
+   * @tparam TargetType The target representation type
+   * @param source The source data representation
+   * @param reservation Caller-owned reservation on the target memory space
+   * @param stream CUDA stream for memory operations
+   * @return std::unique_ptr<TargetType> The converted representation
+   * @throws std::runtime_error if no converter is registered for the type pair
+   */
+  template <typename TargetType>
+  std::unique_ptr<TargetType> convert(idata_representation& source,
+                                      memory::reservation& reservation,
+                                      rmm::cuda_stream_view stream = rmm::cuda_stream_default) const
+  {
+    converter_key key{std::type_index(typeid(source)), std::type_index(typeid(TargetType))};
+    auto result = convert_impl(key, source, &reservation.get_memory_space(), stream, &reservation);
     return std::unique_ptr<TargetType>(static_cast<TargetType*>(result.release()));
   }
 
@@ -204,6 +239,9 @@ class representation_converter_registry {
    * @param stream CUDA stream for memory operations
    * @return std::unique_ptr<idata_representation> The converted representation
    * @throws std::runtime_error if no converter is registered for the type pair
+   *
+   * @note This runtime-typed overload always allocates without a reservation. Callers that hold a
+   *       reservation should use the templated convert<TargetType>(source, reservation, stream).
    */
   std::unique_ptr<idata_representation> convert(
     idata_representation& source,
@@ -239,7 +277,8 @@ class representation_converter_registry {
     const converter_key& key,
     idata_representation& source,
     const memory::memory_space* target_memory_space,
-    rmm::cuda_stream_view stream) const;
+    rmm::cuda_stream_view stream,
+    memory::reservation* reservation) const;
   bool unregister_converter_impl(const converter_key& key);
 
   mutable std::shared_mutex _mutex;
