@@ -5,6 +5,9 @@
 
 #include <cucascade/memory/topology_discovery.hpp>
 
+#include <rmm/cuda_device.hpp>
+#include <rmm/detail/runtime_capabilities.hpp>
+
 #include <dlfcn.h>
 #include <ifaddrs.h>
 #include <nvml.h>
@@ -55,6 +58,28 @@ struct NetworkDeviceWithTopology {
 void report_nvml_error(nvmlReturn_t result, std::string const& context)
 {
   std::cerr << "Warning: " << context << ": " << nvmlErrorString(result) << std::endl;
+}
+
+/**
+ * @brief Query whether a CUDA device supports hardware-accelerated decompression.
+ *
+ * Delegates to `rmm::detail::hwdecompress::is_supported()`, which checks the CUDA
+ * driver version. RMM's capability queries are scoped to the current device, so the
+ * call is wrapped in an `rmm::cuda_set_device_raii`. Best-effort: any failure while
+ * setting the device or probing yields false.
+ *
+ * @param cuda_ordinal CUDA device ordinal (matches the runtime device index used
+ * elsewhere in discovery under the same CUDA_VISIBLE_DEVICES ordering).
+ * @return true iff the hardware decompression engine is available.
+ */
+bool query_hw_decompression(unsigned int cuda_ordinal)
+{
+  try {
+    rmm::cuda_set_device_raii set_device{rmm::cuda_device_id{static_cast<int>(cuda_ordinal)}};
+    return rmm::detail::hwdecompress::is_supported();
+  } catch (...) {
+    return false;
+  }
 }
 
 /**
@@ -882,8 +907,9 @@ bool topology_discovery::discover(NetworkDeviceVerification net_verification)
   for (size_t visible_idx = 0; visible_idx < visible_indices.size(); ++visible_idx) {
     size_t nvml_idx = visible_indices[visible_idx];
     if (nvml_idx >= nvml_gpus.size()) { continue; }
-    auto gpu = nvml_gpus[nvml_idx];
-    gpu.id   = static_cast<unsigned int>(visible_idx);
+    auto gpu                       = nvml_gpus[nvml_idx];
+    gpu.id                         = static_cast<unsigned int>(visible_idx);
+    gpu.hw_decompression_available = query_hw_decompression(gpu.id);
     topology.gpus.push_back(std::move(gpu));
   }
 
