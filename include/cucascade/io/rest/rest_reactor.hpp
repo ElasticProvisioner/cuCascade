@@ -42,6 +42,69 @@
 
 namespace cucascade::io::rest {
 
+/// Parse the total object length out of a Content-Range value of the form
+/// "bytes <first>-<last>/<total>".  Returns nullopt when the unit is not
+/// "bytes", the range is unsatisfied ("bytes */..."), or the total is unknown
+/// ("*") — i.e. any response the footer probe cannot trust.
+[[nodiscard]] std::optional<std::size_t> content_range_total(std::string_view content_range);
+
+// ---------------------------------------------------------------------------
+// shared_byte_span
+// ---------------------------------------------------------------------------
+
+namespace detail {
+
+/// Owns a byte buffer plus a span over it.  Exists so @ref make_shared_byte_span
+/// can hand out a shared_ptr to the *span* (via the aliasing constructor) while
+/// the shared_ptr's control block keeps the *buffer* alive.  Never held
+/// directly by callers.
+struct byte_storage {
+  std::vector<std::uint8_t> bytes;
+  std::span<const std::uint8_t> view;
+
+  // `bytes` is declared first, so it is already initialised when `view` binds
+  // to it — the span never sees a moved-from buffer.
+  explicit byte_storage(std::vector<std::uint8_t> b) : bytes(std::move(b)), view(bytes) {}
+
+  // Non-copyable, non-movable: `view` points into `bytes`, so copying would
+  // deep-copy the buffer and leave the copy's span aimed at the original's
+  // allocation.  Only ever built in place by make_shared, so neither is needed.
+  byte_storage(byte_storage const&)            = delete;
+  byte_storage& operator=(byte_storage const&) = delete;
+  byte_storage(byte_storage&&)                 = delete;
+  byte_storage& operator=(byte_storage&&)      = delete;
+};
+
+}  // namespace detail
+
+/// A shared, immutable view over a byte buffer.
+///
+/// Deliberately a span rather than a @c vector: consumers only ever read
+/// through it (@c data / @c size / @c subspan), so exposing the container type —
+/// and with it its allocator, growth policy and mutation API — would leak an
+/// implementation detail into the interface.  Ownership still rides along: the
+/// shared_ptr is built with the aliasing constructor, so the control block
+/// retains the underlying buffer while the pointer itself refers to the span.
+using shared_byte_span = std::shared_ptr<const std::span<const std::uint8_t>>;
+
+/// Take ownership of @p bytes and return a @ref shared_byte_span over it.
+/// A single allocation: the buffer and its span live in one control block.
+[[nodiscard]] shared_byte_span make_shared_byte_span(std::vector<std::uint8_t> bytes);
+
+// ---------------------------------------------------------------------------
+// footer_probe
+// ---------------------------------------------------------------------------
+
+/// Result of a suffix-range footer probe: the object's total size plus the
+/// trailing window [window_lo, object_size) captured in @c bytes.  @c bytes is
+/// null when the probe could not be satisfied (the caller then falls back to a
+/// HEAD).  Shared, not copied, with the io_object that carries it for this open.
+struct footer_probe {
+  std::size_t object_size{0};
+  std::size_t window_lo{0};
+  shared_byte_span bytes;
+};
+
 // ---------------------------------------------------------------------------
 // rest_io_object
 // ---------------------------------------------------------------------------
@@ -60,6 +123,24 @@ class rest_io_object : public io_object {
   {
   }
 
+  /// As above, but carrying a suffix-range footer stash: @p stash holds the
+  /// object's bytes over [window_lo, object_size), so @c rest_reactor::host_read
+  /// serves any read fully inside that window from memory instead of a GET.
+  rest_io_object(std::string path,
+                 std::string bucket,
+                 std::string key,
+                 size_t object_size,
+                 size_t window_lo,
+                 shared_byte_span stash)
+    : _path(std::move(path)),
+      _bucket(std::move(bucket)),
+      _key(std::move(key)),
+      _file_size(object_size),
+      _window_lo(window_lo),
+      _stash(std::move(stash))
+  {
+  }
+
   [[nodiscard]] const std::string& raw_file_cache_id() const noexcept override { return _path; }
   [[nodiscard]] const std::string& object_path() const noexcept override { return _path; }
   [[nodiscard]] size_t size() const noexcept override { return _file_size; }
@@ -68,11 +149,19 @@ class rest_io_object : public io_object {
   [[nodiscard]] const std::string& key() const noexcept { return _key; }
   [[nodiscard]] object_ref get_object_ref() const { return object_ref{_bucket, _key}; }
 
+  /// Trailing bytes prefetched at open (a suffix-range footer probe), or null
+  /// when the object was opened without one.  A read fully inside
+  /// [stash_window_lo, size) is served from here by @c host_read.
+  [[nodiscard]] shared_byte_span const& stash() const noexcept { return _stash; }
+  [[nodiscard]] size_t stash_window_lo() const noexcept { return _window_lo; }
+
  private:
   std::string _path;
   std::string _bucket;
   std::string _key;
   size_t _file_size{0};
+  size_t _window_lo{0};
+  shared_byte_span _stash;
 };
 
 // ---------------------------------------------------------------------------
@@ -190,6 +279,24 @@ class rest_reactor {
   /// an @c rest_io_object.  @p bucket / @p key identify the object.
   size_t head_object_size(std::string_view bucket, std::string_view key);
 
+  /// Blocking suffix-range GET of the last @p n bytes of an object, resolving
+  /// the size and stashing the parquet footer in a single round-trip.  On a
+  /// well-formed 206 the returned @c footer_probe carries the object size, the
+  /// window origin, and the trailing bytes; on any unusable response (200 full
+  /// body, missing / unsatisfied Content-Range) @c bytes is null so the caller
+  /// falls back to a HEAD.  @p bucket / @p key identify the object.
+  footer_probe fetch_footer_suffix(std::string_view bucket, std::string_view key, std::size_t n);
+
+  /// Blocking bucket-level ListObjectsV2 GET for one page: returns the raw XML
+  /// body on HTTP 200.  @p canonical_query is the pre-encoded, key-sorted
+  /// request query (no auth params — authorization is added via
+  /// @c authorize_list).  @p prefix is only for retry-log / error text.
+  /// Control-plane op: retries are WARN-logged like every retry loop here, but
+  /// the XML body is never treated as object-read payload.
+  std::string list_page(std::string_view bucket,
+                        std::string_view prefix,
+                        std::string_view canonical_query);
+
   // -- capabilities / factory ----------------------------------------------
 
   /// True iff @p path is an s3:// URL this reactor can serve.
@@ -203,7 +310,7 @@ class rest_reactor {
   {
     // Network round-trips are high-latency; read ahead on demand rather than
     // eagerly prefilling the whole working set.
-    return cache::prefetching_stage::opportunistic;
+    return cache::prefetching_stage::just_in_time;
   }
 
   /// REST has no physical block alignment, so this only coalesces overlapping /
