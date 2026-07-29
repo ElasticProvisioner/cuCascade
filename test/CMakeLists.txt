@@ -20,7 +20,8 @@ include(FetchContent)
 FetchContent_Declare(
   Catch2
   GIT_REPOSITORY https://github.com/catchorg/Catch2.git
-  GIT_TAG v2.13.10)
+  GIT_TAG v3.8.1
+  GIT_SHALLOW TRUE)
 FetchContent_MakeAvailable(Catch2)
 
 if(NOT CUCASCADE_TOPOLOGY_ONLY)
@@ -44,9 +45,8 @@ if(NOT CUCASCADE_TOPOLOGY_ONLY)
 
   # Set include directories
   target_include_directories(
-    cucascade_tests
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/utils
-            ${Catch2_SOURCE_DIR}/single_include)
+    cucascade_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+                            ${CMAKE_CURRENT_SOURCE_DIR}/utils)
 
   # Link dependencies
   target_link_libraries(cucascade_tests PRIVATE cucascade Catch2::Catch2
@@ -103,9 +103,8 @@ if(NOT CUCASCADE_TOPOLOGY_ONLY AND CUCASCADE_BUILD_CUDF)
 
   # Set include directories
   target_include_directories(
-    cucascade_cudf_tests
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/utils
-            ${Catch2_SOURCE_DIR}/single_include)
+    cucascade_cudf_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+                                 ${CMAKE_CURRENT_SOURCE_DIR}/utils)
 
   # Link dependencies
   target_link_libraries(
@@ -125,9 +124,8 @@ set_target_properties(cucascade_topology_discovery_tests
 
 # Set include directories
 target_include_directories(
-  cucascade_topology_discovery_tests
-  PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/utils
-          ${Catch2_SOURCE_DIR}/single_include)
+  cucascade_topology_discovery_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+                                             ${CMAKE_CURRENT_SOURCE_DIR}/utils)
 
 # Link dependencies
 target_link_libraries(cucascade_topology_discovery_tests
