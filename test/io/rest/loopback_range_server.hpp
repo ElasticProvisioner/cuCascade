@@ -54,6 +54,21 @@ struct range_fault_policy {
   bool fail_all_heads{false};
   int head_fail_status{503};
   std::chrono::milliseconds response_delay{0};
+  bool ignore_range_with_200{false};
+  bool fail_range_with_416{false};
+  bool malformed_content_range{false};
+  bool omit_successful_content_range{false};
+  std::string failed_get_etag;
+  std::string failed_get_retry_after;
+  std::string failed_head_etag;
+  std::string failed_head_retry_after;
+  std::string successful_get_etag;
+  std::string successful_head_etag;
+  std::string interim_get_etag;
+  std::string interim_get_content_range;
+  std::string interim_get_retry_after;
+  std::string interim_head_etag;
+  std::string interim_head_retry_after;
 };
 
 struct listed_object {
@@ -124,6 +139,33 @@ class loopback_range_server {
  private:
   static std::string errno_message() { return std::strerror(errno); }
 
+  static void append_etag_header(std::string& response, std::string const& etag)
+  {
+    if (!etag.empty()) { response += "\r\nETag: " + etag; }
+  }
+
+  static void append_header(std::string& response, std::string_view name, std::string const& value)
+  {
+    if (value.empty()) { return; }
+    response += "\r\n";
+    response.append(name);
+    response += ": " + value;
+  }
+
+  static void send_interim_headers(int fd,
+                                   std::string const& etag,
+                                   std::string const& content_range,
+                                   std::string const& retry_after)
+  {
+    if (etag.empty() && content_range.empty() && retry_after.empty()) { return; }
+    std::string response{"HTTP/1.1 100 Continue"};
+    append_etag_header(response, etag);
+    append_header(response, "Content-Range", content_range);
+    append_header(response, "Retry-After", retry_after);
+    response += "\r\n\r\n";
+    send_all(fd, response);
+  }
+
   void accept_loop()
   {
     while (!_stop.load(std::memory_order_relaxed)) {
@@ -161,15 +203,20 @@ class loopback_range_server {
 
     if (is_head) {
       auto const head_idx = _head_count.fetch_add(1, std::memory_order_relaxed);
+      send_interim_headers(fd, _fault.interim_head_etag, {}, _fault.interim_head_retry_after);
       if (_fault.fail_all_heads || head_idx < _fault.fail_first_heads) {
-        send_all(fd,
-                 "HTTP/1.1 " + std::to_string(_fault.head_fail_status) +
-                   " Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        std::string response =
+          "HTTP/1.1 " + std::to_string(_fault.head_fail_status) + " Error\r\nContent-Length: 0";
+        append_etag_header(response, _fault.failed_head_etag);
+        append_header(response, "Retry-After", _fault.failed_head_retry_after);
+        response += "\r\nConnection: close\r\n\r\n";
+        send_all(fd, response);
         return;
       }
-      send_all(fd,
-               "HTTP/1.1 200 OK\r\nContent-Length: " + std::to_string(_object.size()) +
-                 "\r\nConnection: close\r\n\r\n");
+      std::string response = "HTTP/1.1 200 OK\r\nContent-Length: " + std::to_string(_object.size());
+      append_etag_header(response, _fault.successful_head_etag);
+      response += "\r\nConnection: close\r\n\r\n";
+      send_all(fd, response);
       return;
     }
 
@@ -189,27 +236,61 @@ class loopback_range_server {
     }
 
     auto const get_idx = _get_count.fetch_add(1, std::memory_order_relaxed);
+    send_interim_headers(fd,
+                         _fault.interim_get_etag,
+                         _fault.interim_get_content_range,
+                         _fault.interim_get_retry_after);
     if (_fault.fail_all_gets || get_idx < _fault.fail_first_gets) {
-      send_all(fd,
-               "HTTP/1.1 " + std::to_string(_fault.fail_status) +
-                 " Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+      std::string response =
+        "HTTP/1.1 " + std::to_string(_fault.fail_status) + " Error\r\nContent-Length: 0";
+      append_etag_header(response, _fault.failed_get_etag);
+      append_header(response, "Retry-After", _fault.failed_get_retry_after);
+      response += "\r\nConnection: close\r\n\r\n";
+      send_all(fd, response);
       return;
     }
 
     if (auto range = parse_range(request)) {
+      if (_fault.fail_range_with_416) {
+        std::string response{"HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0"};
+        append_etag_header(response, _fault.failed_get_etag);
+        response += "\r\nConnection: close\r\n\r\n";
+        send_all(fd, response);
+        return;
+      }
+      if (_fault.ignore_range_with_200) {
+        std::string response =
+          "HTTP/1.1 200 OK\r\nContent-Length: " + std::to_string(_object.size());
+        append_etag_header(response, _fault.failed_get_etag);
+        response += "\r\nConnection: close\r\n\r\n";
+        send_all(fd, response);
+        send_all(fd, _object.data(), _object.size());
+        return;
+      }
       auto const [start, end] = *range;
       auto const size         = end - start + 1;
-      send_all(fd,
-               "HTTP/1.1 206 Partial Content\r\nContent-Length: " + std::to_string(size) +
-                 "\r\nContent-Range: bytes " + std::to_string(start) + "-" + std::to_string(end) +
-                 "/" + std::to_string(_object.size()) + "\r\nConnection: close\r\n\r\n");
+      std::string response =
+        "HTTP/1.1 206 Partial Content\r\nContent-Length: " + std::to_string(size);
+      if (_fault.malformed_content_range) {
+        response += "\r\nContent-Range: bytes malformed";
+        append_etag_header(response, _fault.failed_get_etag);
+      } else {
+        if (!_fault.omit_successful_content_range) {
+          response += "\r\nContent-Range: bytes " + std::to_string(start) + "-" +
+                      std::to_string(end) + "/" + std::to_string(_object.size());
+        }
+        append_etag_header(response, _fault.successful_get_etag);
+      }
+      response += "\r\nConnection: close\r\n\r\n";
+      send_all(fd, response);
       send_all(fd, _object.data() + start, size);
       return;
     }
 
-    send_all(fd,
-             "HTTP/1.1 200 OK\r\nContent-Length: " + std::to_string(_object.size()) +
-               "\r\nConnection: close\r\n\r\n");
+    std::string response = "HTTP/1.1 200 OK\r\nContent-Length: " + std::to_string(_object.size());
+    append_etag_header(response, _fault.successful_get_etag);
+    response += "\r\nConnection: close\r\n\r\n";
+    send_all(fd, response);
     send_all(fd, _object.data(), _object.size());
   }
 
